@@ -17,6 +17,11 @@ run = "npm run typecheck"
 depends = ["setup"]
 run = "npm test"
 
+[tasks.check]
+description = "Full gate: format check, lint, typecheck, unit tests. The pre-commit hook runs this; CI runs the same four steps separately"
+depends = ["setup"]
+run = "npm run check"
+
 [tasks.run]
 depends = ["setup"]
 description = "Run the MCP bridge on loopback (needs the TASKFERRY_* env vars from README.md)"
