@@ -1,0 +1,68 @@
+# Things that look like bugs but are not
+
+Working-as-designed behavior a reader would reasonably file as broken. A real
+bug goes in the issue tracker. When a later change restores the "obvious"
+behavior, delete the entry.
+
+## The bridge and gateway only accept loopback connections
+
+**Observe:** `curl http://<this-host's-LAN-or-tailnet-IP>:8787/mcp` is refused
+even with a valid token.
+
+**Why:** both entry points call `listen(port, '127.0.0.1')`
+(`src/server.ts`, `src/gateway.ts`). The README says never to expose the
+listener directly; reaching it from elsewhere is the job of an authenticated
+proxy in front.
+
+**Becomes a bug if:** a deployment guide tells people to reach the bridge
+directly, or a bind-address option is added without Host/Origin checks (there
+are none today).
+
+## Dispatch returns an error until both allowlists are set
+
+**Observe:** `taskferry_dispatch` fails with "dispatch disabled until
+allowlists configured" on a bridge that otherwise works.
+
+**Why:** dispatch needs both `TASKFERRY_ALLOWED_DIRECTORIES` and
+`TASKFERRY_ALLOWED_MODELS`. The bridge refuses to forward a write-capable call
+without them. The test `dispatch fails closed without configured allowlists`
+pins it.
+
+**Becomes a bug if:** the error is raised even though both variables are set
+(check for a trailing separator: directories split on `:`, models on `,`).
+
+## A task in a deleted or unresolvable directory is "not accessible"
+
+**Observe:** `taskferry_status` or `taskferry_result` fails with "task not
+accessible" for a task that exists, after its working directory was removed or
+renamed.
+
+**Why:** the scope guard resolves the task's directory with `realpath` and
+checks it sits under an allowed root. If the path cannot be resolved the guard
+fails closed instead of guessing.
+
+**Becomes a bug if:** a live task in an allowed directory is refused. That
+points at a symlink or root-resolution problem, not at the intended case.
+
+## Tool failures come back as HTTP 200
+
+**Observe:** a rejected tool call (bad arguments, denied directory, daemon
+error) returns status 200 with `result.isError: true`, not a 4xx.
+
+**Why:** MCP reports tool errors inside the JSON-RPC result so the model can
+read them. HTTP status is reserved for transport problems: 401 bad token, 404
+wrong path, 405 non-POST, 415 non-JSON, 400 malformed JSON-RPC.
+
+**Becomes a bug if:** a transport-level failure (bad token, malformed body) is
+ever reported with 200.
+
+## TypeScript is pinned at 6.0.3 while 7.x exists
+
+**Observe:** `npm view typescript dist-tags.latest` reports 7.0.2, but
+`package.json` pins 6.0.3.
+
+**Why:** the pinned `typescript-eslint` 8.72.0 declares the peer range
+`typescript >=4.8.4 <6.1.0`, and `npm install` fails with ERESOLVE against 7.x.
+
+**Becomes a bug if:** a `typescript-eslint` release widens the peer range to
+include 7.x and the pin stays behind.
