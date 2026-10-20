@@ -1,1 +1,31 @@
-{"name":"taskferry-mcp-bridge","version":"0.1.0","private":true,"type":"module","scripts":{"test":"node --experimental-strip-types --test test/*.test.ts","start":"node --experimental-strip-types src/server.ts","gateway":"node --experimental-strip-types src/gateway.ts"},"engines":{"node":">=22.16"}}
+{
+  "name": "taskferry-mcp-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "engines": {
+    "node": ">=26.5.1"
+  },
+  "scripts": {
+    "start": "node src/server.ts",
+    "gateway": "node src/gateway.ts",
+    "test": "npm run test:unit",
+    "test:unit": "node --test \"test/**/*.test.ts\"",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint": "npm exec --no -- eslint .",
+    "typecheck": "npm exec --no -- tsc --noEmit",
+    "check": "npm run format:check && npm run lint && npm run typecheck && npm test"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@types/node": "26.6.5",
+    "eslint": "10.13.0",
+    "eslint-plugin-sonarjs": "4.2.0",
+    "globals": "17.13.0",
+    "prettier": "3.9.10",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.72.0"
+  }
+}

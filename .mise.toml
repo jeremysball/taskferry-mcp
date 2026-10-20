@@ -1,0 +1,33 @@
+[tools]
+node = "26.5.1"
+
+[tasks.setup]
+description = "Install or share node_modules for this checkout (a linked worktree with an unchanged package-lock.json symlinks the primary checkout's node_modules)"
+run = "bash scripts/mise-setup-deps.sh"
+
+[tasks.lint]
+depends = ["setup"]
+run = "npm run lint"
+
+[tasks.typecheck]
+depends = ["setup"]
+run = "npm run typecheck"
+
+[tasks.test]
+depends = ["setup"]
+run = "npm test"
+
+[tasks.run]
+depends = ["setup"]
+description = "Run the MCP bridge on loopback (needs the TASKFERRY_* env vars from README.md)"
+run = "npm start"
+
+[tasks.gateway]
+depends = ["setup"]
+description = "Run the loopback forwarding gateway demo (needs the TASKFERRY_* env vars from README.md)"
+run = "npm run gateway"
+
+# Needs shell activation (`mise activate`) to fire. The task is a fast no-op
+# once node_modules matches the lockfile, so running it on every cd is cheap.
+[hooks]
+enter = "mise run setup"
