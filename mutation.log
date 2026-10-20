@@ -1,0 +1,69 @@
+
+> taskferry-mcp-bridge@0.1.0 test
+> node --experimental-strip-types --test test/*.test.ts
+
+TAP version 13
+# (node:1262) ExperimentalWarning: Type Stripping is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: initialize, discovery and daemon mapping, including fragmented socket responses
+not ok 1 - initialize, discovery and daemon mapping, including fragmented socket responses
+  ---
+  duration_ms: 43.321845
+  type: 'test'
+  location: '/mnt/data/taskferry-mcp/test/bridge.test.ts:18:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly deep-equal:
+    + actual - expected
+    
+      {
+    +   healthy: true
+    -   tasks: []
+      }
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+    tasks:
+  actual:
+    healthy: true
+  operator: 'deepStrictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///mnt/data/taskferry-mcp/test/bridge.test.ts:18:459)
+    process.processTicksAndRejections (node:internal/process/task_queues:105:5)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async startSubtestAfterBootstrap (node:internal/test_runner/harness:296:3)
+  ...
+# Subtest: unauthenticated requests never touch daemon, authenticated read succeeds
+ok 2 - unauthenticated requests never touch daemon, authenticated read succeeds
+  ---
+  duration_ms: 13.090025
+  type: 'test'
+  ...
+# Subtest: dispatch fails closed without configured allowlists
+ok 3 - dispatch fails closed without configured allowlists
+  ---
+  duration_ms: 5.504631
+  type: 'test'
+  ...
+# Subtest: rejects arbitrary daemon methods and invalid tool arguments
+ok 4 - rejects arbitrary daemon methods and invalid tool arguments
+  ---
+  duration_ms: 7.497781
+  type: 'test'
+  ...
+# Subtest: gateway forwards protected requests but rejects unauthorized requests
+ok 5 - gateway forwards protected requests but rejects unauthorized requests
+  ---
+  duration_ms: 10.204407
+  type: 'test'
+  ...
+1..5
+# tests 5
+# suites 0
+# pass 4
+# fail 1
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 225.387655

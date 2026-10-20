@@ -1,0 +1,52 @@
+
+> taskferry-mcp-bridge@0.1.0 test
+> node --experimental-strip-types --test test/*.test.ts
+
+TAP version 13
+# (node:1570) ExperimentalWarning: Type Stripping is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: initialize, discovery and daemon mapping, including fragmented socket responses
+ok 1 - initialize, discovery and daemon mapping, including fragmented socket responses
+  ---
+  duration_ms: 32.761891
+  type: 'test'
+  ...
+# Subtest: unauthenticated requests never touch daemon, authenticated read succeeds
+ok 2 - unauthenticated requests never touch daemon, authenticated read succeeds
+  ---
+  duration_ms: 9.379964
+  type: 'test'
+  ...
+# Subtest: dispatch fails closed without configured allowlists
+ok 3 - dispatch fails closed without configured allowlists
+  ---
+  duration_ms: 4.269197
+  type: 'test'
+  ...
+# Subtest: rejects arbitrary daemon methods and invalid tool arguments
+ok 4 - rejects arbitrary daemon methods and invalid tool arguments
+  ---
+  duration_ms: 6.21164
+  type: 'test'
+  ...
+# Subtest: gateway forwards protected requests but rejects unauthorized requests
+ok 5 - gateway forwards protected requests but rejects unauthorized requests
+  ---
+  duration_ms: 9.773308
+  type: 'test'
+  ...
+# Subtest: cross-workspace status is denied and result content is never requested
+ok 6 - cross-workspace status is denied and result content is never requested
+  ---
+  duration_ms: 8.969665
+  type: 'test'
+  ...
+1..6
+# tests 6
+# suites 0
+# pass 6
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 193.886862

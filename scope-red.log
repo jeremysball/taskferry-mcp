@@ -1,0 +1,70 @@
+
+> taskferry-mcp-bridge@0.1.0 test
+> node --experimental-strip-types --test test/*.test.ts
+
+TAP version 13
+# (node:1523) ExperimentalWarning: Type Stripping is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# Subtest: initialize, discovery and daemon mapping, including fragmented socket responses
+ok 1 - initialize, discovery and daemon mapping, including fragmented socket responses
+  ---
+  duration_ms: 41.593836
+  type: 'test'
+  ...
+# Subtest: unauthenticated requests never touch daemon, authenticated read succeeds
+ok 2 - unauthenticated requests never touch daemon, authenticated read succeeds
+  ---
+  duration_ms: 12.653206
+  type: 'test'
+  ...
+# Subtest: dispatch fails closed without configured allowlists
+ok 3 - dispatch fails closed without configured allowlists
+  ---
+  duration_ms: 4.866569
+  type: 'test'
+  ...
+# Subtest: rejects arbitrary daemon methods and invalid tool arguments
+ok 4 - rejects arbitrary daemon methods and invalid tool arguments
+  ---
+  duration_ms: 6.943014
+  type: 'test'
+  ...
+# Subtest: gateway forwards protected requests but rejects unauthorized requests
+ok 5 - gateway forwards protected requests but rejects unauthorized requests
+  ---
+  duration_ms: 22.942188
+  type: 'test'
+  ...
+# Subtest: cross-workspace status is denied and result content is never requested
+not ok 6 - cross-workspace status is denied and result content is never requested
+  ---
+  duration_ms: 6.586285
+  type: 'test'
+  location: '/mnt/data/taskferry-work/taskferry-mcp/test/bridge.test.ts:24:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly equal:
+    + actual - expected
+    
+    + undefined
+    - true
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: true
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///mnt/data/taskferry-work/taskferry-mcp/test/bridge.test.ts:28:185)
+    process.processTicksAndRejections (node:internal/process/task_queues:105:5)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
+  ...
+1..6
+# tests 6
+# suites 0
+# pass 5
+# fail 1
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 281.598703
