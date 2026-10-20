@@ -60,32 +60,95 @@ const tools = [
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
 ];
+const TASK_STATUS = 'task.status';
+const MAX_BYTES = 1024 * 1024;
+const INVALID_ARGUMENTS = 'invalid arguments';
+const ALLOWLIST_REQUIRED = 'workspace allowlist required';
+
+type Json = Record<string, unknown>;
+type DaemonReply = {
+  version?: unknown;
+  id?: unknown;
+  ok?: unknown;
+  result?: unknown;
+  error?: { message?: unknown };
+};
+type RpcRequest = { jsonrpc: '2.0'; method: string; id?: unknown; params?: Json };
+
 function permitted(a: string, b: string) {
   const x = Buffer.from(a),
     y = Buffer.from(b);
   return x.length === y.length && timingSafeEqual(x, y);
 }
-function argsValid(a: any, keys: string[], required: string[] = []) {
+
+// Narrows to the declared string arguments: every `required` key must be a
+// non-blank string, `optional` keys may be absent, and no other key is allowed.
+function argsValid<R extends string, O extends string = never>(
+  a: unknown,
+  required: readonly R[],
+  optional: readonly O[] = [],
+): a is Record<R, string> & Partial<Record<O, string>> {
+  if (typeof a !== 'object' || a === null || Array.isArray(a)) return false;
+  const rec = a as Json;
+  const allowed: readonly string[] = [...required, ...optional];
+  const isString = (v: unknown): v is string => typeof v === 'string';
   return (
-    a &&
-    typeof a === 'object' &&
-    !Array.isArray(a) &&
-    Object.keys(a).every((k) => keys.includes(k)) &&
-    required.every((k) => typeof a[k] === 'string' && a[k].trim()) &&
-    keys.every((k) => a[k] === undefined || typeof a[k] === 'string')
+    Object.keys(rec).every((k) => allowed.includes(k)) &&
+    required.every((k) => {
+      const v = rec[k];
+      return isString(v) && v.trim() !== '';
+    }) &&
+    optional.every((k) => rec[k] === undefined || isString(rec[k]))
   );
 }
-function callDaemon(socketPath: string, method: string, params: any, timeout = 5000): Promise<any> {
+
+// Resolves to the reply's result when `line` answers request `id`, to
+// undefined when it answers another request, and throws on a bad reply.
+function readReply(line: string, id: string): { result: unknown } | undefined {
+  let reply: unknown;
+  try {
+    reply = JSON.parse(line);
+  } catch {
+    throw new Error('invalid daemon JSON');
+  }
+  if (typeof reply !== 'object' || reply === null) throw new Error('invalid daemon reply');
+  const r = reply as DaemonReply;
+  if (r.id !== id) return undefined;
+  if (r.version !== 1) throw new Error('unexpected daemon protocol version');
+  if (r.ok !== true) throw new Error(String(r.error?.message || 'daemon rejected request'));
+  return { result: r.result };
+}
+
+function callDaemon(
+  socketPath: string,
+  method: string,
+  params: Json,
+  timeout = 5000,
+): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const id = randomUUID(),
       socket = net.createConnection(socketPath);
     let data = '',
       finished = false;
-    const finish = (err?: Error, value?: any) => {
+    const finish = (err?: Error, value?: unknown) => {
       if (finished) return;
       finished = true;
       socket.destroy();
-      err ? reject(err) : resolve(value);
+      if (err) reject(err);
+      else resolve(value);
+    };
+    const drain = () => {
+      let n = data.indexOf('\n');
+      while (n >= 0) {
+        const line = data.slice(0, n);
+        data = data.slice(n + 1);
+        const reply = readReply(line, id);
+        if (reply) {
+          finish(undefined, reply.result);
+          return;
+        }
+        n = data.indexOf('\n');
+      }
     };
     socket.setTimeout(timeout, () => finish(new Error('daemon timeout')));
     socket.on('error', (e) => finish(e));
@@ -95,179 +158,207 @@ function callDaemon(socketPath: string, method: string, params: any, timeout = 5
     );
     socket.on('data', (chunk) => {
       data += chunk.toString();
-      if (Buffer.byteLength(data) > 1024 * 1024)
-        return finish(new Error('daemon response too large'));
-      let n;
-      while ((n = data.indexOf('\n')) >= 0) {
-        const line = data.slice(0, n);
-        data = data.slice(n + 1);
-        let response: any;
-        try {
-          response = JSON.parse(line);
-        } catch {
-          return finish(new Error('invalid daemon JSON'));
-        }
-        if (response.id !== id) continue;
-        if (response.version !== 1) return finish(new Error('unexpected daemon protocol version'));
-        if (response.ok !== true)
-          return finish(new Error(response.error?.message || 'daemon rejected request'));
-        return finish(undefined, response.result);
+      if (Buffer.byteLength(data) > MAX_BYTES) {
+        finish(new Error('daemon response too large'));
+        return;
+      }
+      try {
+        drain();
+      } catch (e) {
+        finish(e instanceof Error ? e : new Error(String(e)));
       }
     });
   });
 }
-async function invokeTool(name: string, args: any, c: Config) {
-  let method: string, params: any;
-  if (name === 'taskferry_health') {
-    if (!argsValid(args, [])) throw Error('invalid arguments');
-    method = 'system.health';
-    params = {};
-  } else if (name === 'taskferry_list') {
-    if (!argsValid(args, ['directory'])) throw Error('invalid arguments');
-    if (!c.allowDirectories.length) throw Error('workspace allowlist required');
-    const directory = args.directory ?? c.allowDirectories[0];
-    if (!c.allowDirectories.includes(directory)) throw Error('directory denied');
-    method = 'task.list';
-    params = { directory };
-  } else if (name === 'taskferry_status' || name === 'taskferry_result') {
-    if (!argsValid(args, ['taskId'], ['taskId'])) throw Error('taskId required');
-    if (!c.allowDirectories.length) throw Error('workspace allowlist required');
-    const status = await callDaemon(c.socketPath, 'task.status', { taskId: args.taskId });
-    if (
-      typeof status?.directory !== 'string' ||
-      !c.allowDirectories.some((root) => {
-        try {
-          const r = realpathSync(root),
-            d = realpathSync(status.directory);
-          return d === r || d.startsWith(r + path.sep);
-        } catch {
-          return false;
-        }
-      })
-    )
-      throw Error('task not accessible');
-    if (name === 'taskferry_status') return status;
-    method = 'task.result';
-    params = { taskId: args.taskId };
-  } else if (name === 'taskferry_dispatch') {
-    if (!argsValid(args, ['directory', 'model', 'prompt'], ['directory', 'model', 'prompt']))
-      throw Error('invalid arguments');
-    if (!c.allowDirectories.length || !c.allowModels.length)
-      throw Error('dispatch disabled until allowlists configured');
-    let real: string;
-    try {
-      real = realpathSync(args.directory);
-    } catch {
-      throw Error('directory unavailable');
-    }
-    if (
-      !c.allowDirectories.some((root) => {
-        try {
-          const r = realpathSync(root);
-          return real === r || real.startsWith(r + path.sep);
-        } catch {
-          return false;
-        }
-      }) ||
-      !c.allowModels.includes(args.model)
-    )
-      throw Error('directory or model denied');
-    method = 'task.dispatch';
-    params = { directory: real, model: args.model, prompt: args.prompt };
-  } else throw Error('unknown tool');
-  return callDaemon(c.socketPath, method, params);
+
+function isUnder(root: string, candidate: string) {
+  try {
+    const r = realpathSync(root),
+      d = realpathSync(candidate);
+    return d === r || d.startsWith(r + path.sep);
+  } catch {
+    return false;
+  }
 }
+const inAllowedRoot = (c: Config, dir: string) =>
+  c.allowDirectories.some((root) => isUnder(root, dir));
+
+async function health(args: unknown, c: Config) {
+  if (!argsValid(args, [])) throw new Error(INVALID_ARGUMENTS);
+  return callDaemon(c.socketPath, 'system.health', {});
+}
+
+async function list(args: unknown, c: Config) {
+  if (!argsValid(args, [], ['directory'])) throw new Error(INVALID_ARGUMENTS);
+  if (!c.allowDirectories.length) throw new Error(ALLOWLIST_REQUIRED);
+  const directory = args.directory ?? c.allowDirectories[0];
+  if (directory === undefined || !c.allowDirectories.includes(directory)) {
+    throw new Error('directory denied');
+  }
+  return callDaemon(c.socketPath, 'task.list', { directory });
+}
+
+function scopedTaskId(args: unknown, c: Config) {
+  if (!argsValid(args, ['taskId'])) throw new Error('taskId required');
+  if (!c.allowDirectories.length) throw new Error(ALLOWLIST_REQUIRED);
+  return args.taskId;
+}
+
+// Reads the task's status and refuses unless its directory is inside an allowed root.
+async function inScopeStatus(taskId: string, c: Config) {
+  const current = await callDaemon(c.socketPath, TASK_STATUS, { taskId });
+  const directory = (current as Json | null)?.directory;
+  if (typeof directory !== 'string' || !inAllowedRoot(c, directory)) {
+    throw new Error('task not accessible');
+  }
+  return current;
+}
+
+const status = async (args: unknown, c: Config) => inScopeStatus(scopedTaskId(args, c), c);
+
+async function result(args: unknown, c: Config) {
+  const taskId = scopedTaskId(args, c);
+  await inScopeStatus(taskId, c);
+  return callDaemon(c.socketPath, 'task.result', { taskId });
+}
+
+async function dispatch(args: unknown, c: Config) {
+  if (!argsValid(args, ['directory', 'model', 'prompt'])) throw new Error(INVALID_ARGUMENTS);
+  if (!c.allowDirectories.length || !c.allowModels.length) {
+    throw new Error('dispatch disabled until allowlists configured');
+  }
+  let real: string;
+  try {
+    real = realpathSync(args.directory);
+  } catch {
+    throw new Error('directory unavailable');
+  }
+  if (!inAllowedRoot(c, real) || !c.allowModels.includes(args.model)) {
+    throw new Error('directory or model denied');
+  }
+  return callDaemon(c.socketPath, 'task.dispatch', {
+    directory: real,
+    model: args.model,
+    prompt: args.prompt,
+  });
+}
+
+const handlers: Record<string, (args: unknown, c: Config) => Promise<unknown>> = {
+  taskferry_health: health,
+  taskferry_list: list,
+  taskferry_status: status,
+  taskferry_result: result,
+  taskferry_dispatch: dispatch,
+};
+async function invokeTool(name: unknown, args: unknown, c: Config) {
+  if (typeof name !== 'string' || !Object.hasOwn(handlers, name)) throw new Error('unknown tool');
+  return handlers[name]?.(args, c);
+}
+
+async function callTool(params: Json | undefined, config: Config) {
+  try {
+    const value = await invokeTool(params?.name, params?.arguments ?? {}, config);
+    return { content: [{ type: 'text', text: JSON.stringify(value) }] };
+  } catch (e) {
+    return {
+      content: [{ type: 'text', text: e instanceof Error ? e.message : String(e) }],
+      isError: true,
+    };
+  }
+}
+
+const rpcMethods: Record<string, (params: Json | undefined, config: Config) => unknown> = {
+  initialize: () => ({
+    protocolVersion: '2025-03-26',
+    capabilities: { tools: {} },
+    serverInfo: { name: 'taskferry-mcp', version: '0.1.0' },
+  }),
+  ping: () => ({}),
+  'tools/list': () => ({ tools }),
+  'tools/call': callTool,
+};
+
+const rpcError = (requestId: unknown, code: number, message: string) => ({
+  jsonrpc: '2.0',
+  id: requestId,
+  error: { code, message },
+});
+function sendJson(res: http.ServerResponse, status: number, body: unknown) {
+  res.writeHead(status, { 'Content-Type': 'application/json' }).end(JSON.stringify(body));
+}
+
+// The HTTP status to refuse with before reading the body, if any.
+function refusal(req: http.IncomingMessage, config: Config) {
+  if (req.url !== '/mcp') return 404;
+  const auth = req.headers.authorization || '';
+  if (!auth.startsWith('Bearer ') || !permitted(auth.slice(7), config.token)) return 401;
+  if (req.method !== 'POST') return 405;
+  if (!(req.headers['content-type'] || '').includes('application/json')) return 415;
+  return undefined;
+}
+
+async function readBody(req: http.IncomingMessage) {
+  let body = '';
+  for await (const chunk of req) {
+    body += chunk.toString();
+    if (Buffer.byteLength(body) > MAX_BYTES) throw new Error('request too large');
+  }
+  return body;
+}
+
+function parseRpc(body: string): RpcRequest {
+  const message = JSON.parse(body) as Partial<RpcRequest> | null;
+  const paramsOk =
+    message?.params === undefined ||
+    (typeof message.params === 'object' && message.params !== null);
+  if (message?.jsonrpc !== '2.0' || typeof message.method !== 'string' || !paramsOk) {
+    throw new Error('invalid JSON-RPC request');
+  }
+  return message as RpcRequest;
+}
+
+async function route(message: RpcRequest, config: Config, res: http.ServerResponse) {
+  if (message.method === 'notifications/initialized') {
+    res.writeHead(202).end();
+    return;
+  }
+  if (!Object.hasOwn(rpcMethods, message.method)) {
+    sendJson(res, 200, rpcError(message.id ?? null, -32601, 'method not found'));
+    return;
+  }
+  const result = await rpcMethods[message.method]?.(message.params, config);
+  if (message.id === undefined || message.id === null) {
+    res.writeHead(202).end();
+    return;
+  }
+  sendJson(res, 200, { jsonrpc: '2.0', id: message.id, result });
+}
+
 export function createBridge(config: Config) {
-  if (!config.token) throw Error('bearer token required');
+  if (!config.token) throw new Error('bearer token required');
   return http.createServer(async (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
-    if (req.url !== '/mcp') {
-      res.writeHead(404).end();
+    const refused = refusal(req, config);
+    if (refused === 401) {
+      res.writeHead(refused).end('unauthorized');
       return;
     }
-    const auth = req.headers.authorization || '';
-    if (!auth.startsWith('Bearer ') || !permitted(auth.slice(7), config.token)) {
-      res.writeHead(401).end('unauthorized');
+    if (refused) {
+      res.writeHead(refused).end();
       return;
     }
-    if (req.method !== 'POST') {
-      res.writeHead(405).end();
-      return;
-    }
-    if (!(req.headers['content-type'] || '').includes('application/json')) {
-      res.writeHead(415).end();
-      return;
-    }
-    let body = '';
     try {
-      for await (const chunk of req) {
-        body += chunk.toString();
-        if (Buffer.byteLength(body) > 1024 * 1024) throw Error('request too large');
-      }
-      const message = JSON.parse(body);
-      if (
-        message.jsonrpc !== '2.0' ||
-        typeof message.method !== 'string' ||
-        (message.params !== undefined && (typeof message.params !== 'object' || !message.params))
-      )
-        throw Error('invalid JSON-RPC request');
-      let result: any;
-      if (message.method === 'initialize')
-        result = {
-          protocolVersion: '2025-03-26',
-          capabilities: { tools: {} },
-          serverInfo: { name: 'taskferry-mcp', version: '0.1.0' },
-        };
-      else if (message.method === 'notifications/initialized') {
-        res.writeHead(202).end();
-        return;
-      } else if (message.method === 'ping') result = {};
-      else if (message.method === 'tools/list') result = { tools };
-      else if (message.method === 'tools/call') {
-        const name = message.params?.name,
-          args = message.params?.arguments ?? {};
-        try {
-          const value = await invokeTool(name, args, config);
-          result = { content: [{ type: 'text', text: JSON.stringify(value) }] };
-        } catch (e) {
-          result = {
-            content: [{ type: 'text', text: e instanceof Error ? e.message : String(e) }],
-            isError: true,
-          };
-        }
-      } else {
-        res.writeHead(200, { 'Content-Type': 'application/json' }).end(
-          JSON.stringify({
-            jsonrpc: '2.0',
-            id: message.id ?? null,
-            error: { code: -32601, message: 'method not found' },
-          }),
-        );
-        return;
-      }
-      if (message.id === undefined || message.id === null) {
-        res.writeHead(202).end();
-        return;
-      }
-      res
-        .writeHead(200, { 'Content-Type': 'application/json' })
-        .end(JSON.stringify({ jsonrpc: '2.0', id: message.id, result }));
-    } catch (e) {
-      res.writeHead(400, { 'Content-Type': 'application/json' }).end(
-        JSON.stringify({
-          jsonrpc: '2.0',
-          id: null,
-          error: { code: -32600, message: 'invalid request' },
-        }),
-      );
+      await route(parseRpc(await readBody(req)), config, res);
+    } catch {
+      sendJson(res, 400, rpcError(null, -32600, 'invalid request'));
     }
   });
 }
 if (process.argv[1]?.endsWith('/server.ts')) {
   const token = process.env.TASKFERRY_MCP_TOKEN || '';
   const server = createBridge({
-    socketPath: process.env.TASKFERRY_SOCKET_PATH || '',
     token,
+    socketPath: process.env.TASKFERRY_SOCKET_PATH || '',
     allowDirectories: (process.env.TASKFERRY_ALLOWED_DIRECTORIES || '').split(':').filter(Boolean),
     allowModels: (process.env.TASKFERRY_ALLOWED_MODELS || '').split(',').filter(Boolean),
   });

@@ -31,13 +31,13 @@ export function createGateway(c: Config) {
         if (Buffer.byteLength(body) > 1024 * 1024) throw Error('too large');
       }
       const upstream = await fetch(dest, {
+        body,
         method: 'POST',
         headers: {
           authorization: `Bearer ${c.upstreamToken}`,
           'content-type': 'application/json',
           accept: 'application/json, text/event-stream',
         },
-        body,
         signal: AbortSignal.timeout(10000),
       });
       const output = await upstream.text();
