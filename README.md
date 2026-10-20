@@ -41,7 +41,7 @@ Gateway is a generic Node.js forwarding _reference implementation_, not deployed
 
 - Real TaskFerry read-only daemon integration untested; exact `task.dispatch` parameters may differ, so dispatch must remain disabled until validated.
 - MCP Streamable HTTP compatibility requires client-specific verification (Accept, initialization, session/version negotiation, streaming, notifications, lifecycle). Current server supports basic JSON responses and notification 202 handling; it does not offer SSE streaming or sessions.
-- Status/result access is scoped to the allowed directories (see the scope guard section below), but an unknown task ID returns the daemon's "unknown task id" error while an out-of-scope one returns "task not accessible", so a caller can tell which IDs exist.
+- Status/result access is scoped to the allowed directories (see the scope guard section below). An unknown task ID and an out-of-scope one both answer "task not accessible"; that relies on the daemon sending the error code `UNKNOWN_TASK`, which is read from its source but not exercised against a running daemon.
 - The unit suite is small (see `test/bridge.test.ts`) and does not cover the B01-B18 matrix from the design plan; that plan is not in this repo. No approval snapshot baselines approved by owner.
 - Do not automatically retry ambiguous dispatch failures; no durable idempotency guarantee.
 - The `gateway.ts` module is a Node.js prototype. A Sites-native handler and actual deployment require the Sites runtime/API interface.

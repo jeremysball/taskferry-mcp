@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import type http from 'node:http';
+import http from 'node:http';
 import net from 'node:net';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -9,7 +9,9 @@ import { createBridge } from '../src/server.ts';
 import { createGateway } from '../src/gateway.ts';
 
 const TOKEN = 'correct-secret';
+const GATEWAY_TOKEN = 'gateway-secret';
 const HEALTH = 'taskferry_health';
+const STATUS_TOOL = 'taskferry_status';
 const TASK_STATUS = 'task.status';
 
 type Call = { id: string; method: string; params: Record<string, unknown> };
@@ -32,8 +34,14 @@ async function serve(server: http.Server) {
   return `http://127.0.0.1:${port}/mcp`;
 }
 
-// A daemon that answers every request line with whatever `reply` returns.
-async function stubDaemon(reply: (req: Call) => string) {
+function writeChunks(c: net.Socket, out: string | Buffer[]) {
+  if (typeof out === 'string') c.write(out);
+  else out.forEach((part, i) => setTimeout(() => c.write(part), i * 20));
+}
+
+// A daemon that answers every request line with whatever `reply` returns: one write for a
+// string, one delayed write per element for a list of chunks.
+async function stubDaemon(reply: (req: Call) => string | Buffer[]) {
   const dir = mkdtempSync(path.join(tmpdir(), 'tf-stub-'));
   const socket = path.join(dir, 'daemon.sock');
   const calls: Call[] = [];
@@ -49,7 +57,7 @@ async function stubDaemon(reply: (req: Call) => string) {
         if (!line) continue;
         const req: Call = JSON.parse(line);
         calls.push(req);
-        c.write(reply(req));
+        writeChunks(c, reply(req));
       }
     });
   });
@@ -164,7 +172,7 @@ test('rejects arbitrary daemon methods and invalid tool arguments', async () => 
     const unknown = await json(await send(f.url, toolCall('task.delete')));
     assert.equal(unknown.result.isError, true);
     const bad = await json(
-      await send(f.url, toolCall('taskferry_status', { taskId: '', override: true })),
+      await send(f.url, toolCall(STATUS_TOOL, { taskId: '', override: true })),
     );
     assert.equal(bad.result.isError, true);
     assert.equal(f.calls.length, 0);
@@ -176,14 +184,14 @@ test('gateway forwards protected requests but rejects unauthorized requests', as
   const f = await fixture();
   const gateway = createGateway({
     upstreamUrl: f.url,
-    inboundToken: 'gateway-secret',
+    inboundToken: GATEWAY_TOKEN,
     upstreamToken: TOKEN,
   });
   const url = await serve(gateway);
   try {
     assert.equal((await send(url, toolCall(HEALTH), 'wrong')).status, 401);
     assert.equal(f.calls.length, 0);
-    const result = await json(await send(url, toolCall(HEALTH), 'gateway-secret'));
+    const result = await json(await send(url, toolCall(HEALTH), GATEWAY_TOKEN));
     assert.equal(result.result.isError, undefined);
     assert.equal(f.calls.length, 1);
   } finally {
@@ -213,7 +221,7 @@ test('cross-workspace status is denied and result content is never requested', a
   });
   const url = await serve(bridge);
   try {
-    for (const name of ['taskferry_status', 'taskferry_result']) {
+    for (const name of [STATUS_TOOL, 'taskferry_result']) {
       const response = await json(
         await send(url, toolCall(name, { taskId: 'foreign-task' }), 'safe'),
       );
@@ -246,5 +254,121 @@ test('a non-object daemon reply becomes a tool error instead of crashing the bri
   } finally {
     await stop(bridge);
     await daemon.close();
+  }
+});
+
+const daemonError = (id: string, code: string, message: string) =>
+  JSON.stringify({
+    version: 1,
+    ok: false,
+    error: { code, message, help: '', detail: message },
+    id,
+  }) + '\n';
+
+test('an unknown task id is indistinguishable from an out-of-scope one', async () => {
+  const daemon = await stubDaemon((req) =>
+    daemonError(req.id, 'UNKNOWN_TASK', 'error: unknown task id: nope'),
+  );
+  const bridge = createBridge({
+    socketPath: daemon.socket,
+    token: TOKEN,
+    allowDirectories: [daemon.dir],
+    allowModels: [],
+  });
+  const url = await serve(bridge);
+  try {
+    for (const name of [STATUS_TOOL, 'taskferry_result']) {
+      const res = await json(await send(url, toolCall(name, { taskId: 'nope' })));
+      assert.equal(res.result.isError, true);
+      assert.equal(res.result.content?.[0]?.text, 'task not accessible');
+    }
+  } finally {
+    await stop(bridge);
+    await daemon.close();
+  }
+});
+
+test('other daemon failures still reach the caller, so an outage is not hidden', async () => {
+  const daemon = await stubDaemon((req) =>
+    daemonError(req.id, 'REQUEST_FAILED', 'daemon is on fire'),
+  );
+  const bridge = createBridge({
+    socketPath: daemon.socket,
+    token: TOKEN,
+    allowDirectories: [daemon.dir],
+    allowModels: [],
+  });
+  const url = await serve(bridge);
+  try {
+    const res = await json(await send(url, toolCall(STATUS_TOOL, { taskId: 'abc' })));
+    assert.equal(res.result.isError, true);
+    assert.equal(res.result.content?.[0]?.text, 'daemon is on fire');
+  } finally {
+    await stop(bridge);
+    await daemon.close();
+  }
+});
+
+// Splits `payload` in the middle of its first two-byte character.
+function splitInsideChar(payload: string) {
+  const bytes = Buffer.from(payload);
+  const at = bytes.indexOf(0xc3) + 1;
+  return [bytes.subarray(0, at), bytes.subarray(at)];
+}
+
+test('a multibyte character split across daemon socket chunks survives', async () => {
+  const daemon = await stubDaemon((req) =>
+    splitInsideChar(
+      JSON.stringify({ version: 1, id: req.id, ok: true, result: { text: '\u00e9' } }) + '\n',
+    ),
+  );
+  const bridge = createBridge({
+    socketPath: daemon.socket,
+    token: TOKEN,
+    allowDirectories: [],
+    allowModels: [],
+  });
+  const url = await serve(bridge);
+  try {
+    const res = await json(await send(url, toolCall(HEALTH)));
+    assert.deepEqual(JSON.parse(res.result.content?.[0]?.text ?? ''), { text: '\u00e9' });
+  } finally {
+    await stop(bridge);
+    await daemon.close();
+  }
+});
+
+// POSTs `parts` as separate writes with a pause between them; resolves to the parsed response.
+function sendInParts(url: string, token: string, parts: Buffer[]) {
+  return new Promise<{ id: string }>((resolve, reject) => {
+    const headers = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
+    const req = http.request(url, { method: 'POST', headers }, (res) => {
+      let out = '';
+      res.setEncoding('utf8');
+      res.on('data', (d: string) => (out += d));
+      res.on('end', () => resolve(JSON.parse(out)));
+    });
+    req.on('error', reject);
+    parts.forEach((part, i) =>
+      setTimeout(() => (i === parts.length - 1 ? req.end(part) : req.write(part)), i * 25),
+    );
+  });
+}
+
+test('a multibyte character split across request chunks survives, bridge and gateway', async () => {
+  const f = await fixture();
+  const gateway = createGateway({
+    upstreamUrl: f.url,
+    inboundToken: GATEWAY_TOKEN,
+    upstreamToken: TOKEN,
+  });
+  const gatewayUrl = await serve(gateway);
+  try {
+    const body = splitInsideChar(JSON.stringify({ jsonrpc: '2.0', id: '\u00e9', method: 'ping' }));
+    assert.equal((await sendInParts(f.url, TOKEN, body)).id, '\u00e9');
+    assert.equal((await sendInParts(gatewayUrl, GATEWAY_TOKEN, body)).id, '\u00e9');
+  } finally {
+    await stop(gateway);
+    await f.close();
   }
 });

@@ -61,17 +61,29 @@ const tools = [
   },
 ];
 const TASK_STATUS = 'task.status';
+const UNKNOWN_TASK = 'UNKNOWN_TASK';
+const NOT_ACCESSIBLE = 'task not accessible';
 const MAX_BYTES = 1024 * 1024;
 const INVALID_ARGUMENTS = 'invalid arguments';
 const ALLOWLIST_REQUIRED = 'workspace allowlist required';
 
 type Json = Record<string, unknown>;
+// A failure the daemon itself reported. `code` is the daemon's error code, when it sent one.
+class DaemonError extends Error {
+  readonly code: string | undefined;
+  constructor(message: string, code?: string) {
+    super(message);
+    this.name = 'DaemonError';
+    this.code = code;
+  }
+}
+
 type DaemonReply = {
   version?: unknown;
   id?: unknown;
   ok?: unknown;
   result?: unknown;
-  error?: { message?: unknown };
+  error?: { code?: unknown; message?: unknown };
 };
 type RpcRequest = { jsonrpc: '2.0'; method: string; id?: unknown; params?: Json };
 
@@ -115,7 +127,10 @@ function readReply(line: string, id: string): { result: unknown } | undefined {
   const r = reply as DaemonReply;
   if (r.id !== id) return undefined;
   if (r.version !== 1) throw new Error('unexpected daemon protocol version');
-  if (r.ok !== true) throw new Error(String(r.error?.message || 'daemon rejected request'));
+  if (r.ok !== true) {
+    const code = typeof r.error?.code === 'string' ? r.error.code : undefined;
+    throw new DaemonError(String(r.error?.message || 'daemon rejected request'), code);
+  }
   return { result: r.result };
 }
 
@@ -156,8 +171,9 @@ function callDaemon(
     socket.on('connect', () =>
       socket.write(JSON.stringify({ version: 1, id, method, params }) + '\n'),
     );
-    socket.on('data', (chunk) => {
-      data += chunk.toString();
+    socket.setEncoding('utf8');
+    socket.on('data', (chunk: string) => {
+      data += chunk;
       if (Buffer.byteLength(data) > MAX_BYTES) {
         finish(new Error('daemon response too large'));
         return;
@@ -206,10 +222,18 @@ function scopedTaskId(args: unknown, c: Config) {
 
 // Reads the task's status and refuses unless its directory is inside an allowed root.
 async function inScopeStatus(taskId: string, c: Config) {
-  const current = await callDaemon(c.socketPath, TASK_STATUS, { taskId });
+  let current: unknown;
+  try {
+    current = await callDaemon(c.socketPath, TASK_STATUS, { taskId });
+  } catch (e) {
+    // The daemon's own "unknown task id" would tell a caller which IDs exist.
+    if (e instanceof DaemonError && e.code === UNKNOWN_TASK)
+      throw new Error(NOT_ACCESSIBLE, { cause: e });
+    throw e;
+  }
   const directory = (current as Json | null)?.directory;
   if (typeof directory !== 'string' || !inAllowedRoot(c, directory)) {
-    throw new Error('task not accessible');
+    throw new Error(NOT_ACCESSIBLE);
   }
   return current;
 }
@@ -299,8 +323,9 @@ function refusal(req: http.IncomingMessage, config: Config) {
 
 async function readBody(req: http.IncomingMessage) {
   let body = '';
+  req.setEncoding('utf8');
   for await (const chunk of req) {
-    body += chunk.toString();
+    body += chunk;
     if (Buffer.byteLength(body) > MAX_BYTES) throw new Error('request too large');
   }
   return body;

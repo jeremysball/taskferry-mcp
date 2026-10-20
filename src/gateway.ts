@@ -25,6 +25,7 @@ export function createGateway(c: Config) {
       return;
     }
     let body = '';
+    req.setEncoding('utf8');
     try {
       for await (const chunk of req) {
         body += chunk;

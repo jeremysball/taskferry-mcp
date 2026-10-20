@@ -44,6 +44,21 @@ fails closed instead of guessing.
 **Becomes a bug if:** a live task in an allowed directory is refused. That
 points at a symlink or root-resolution problem, not at the intended case.
 
+## A mistyped task ID says "task not accessible"
+
+**Observe:** `taskferry_status` for an ID that was never issued fails with
+"task not accessible", the same text as for a task in another workspace.
+
+**Why:** the daemon's own "unknown task id" error would let a caller probe
+which IDs exist outside their allowed directories. The scope guard maps the
+daemon's `UNKNOWN_TASK` code to the generic message (`inScopeStatus` in
+`src/server.ts`). Other daemon failures keep their own message so an outage is
+not mistaken for a permissions problem. Both are pinned by tests.
+
+**Becomes a bug if:** the daemon renames the `UNKNOWN_TASK` code. Unknown IDs
+then leak the daemon's wording again. The tests cannot catch that: the stub
+daemon's code is copied from the daemon's source, not read from a live one.
+
 ## Tool failures come back as HTTP 200
 
 **Observe:** a rejected tool call (bad arguments, denied directory, daemon
