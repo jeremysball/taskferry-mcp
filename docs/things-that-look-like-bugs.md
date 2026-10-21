@@ -71,13 +71,21 @@ wrong path, 405 non-POST, 415 non-JSON, 400 malformed JSON-RPC.
 **Becomes a bug if:** a transport-level failure (bad token, malformed body) is
 ever reported with 200.
 
-## TypeScript is pinned at 6.0.3 while 7.x exists
+## Two TypeScript versions are installed
 
-**Observe:** `npm view typescript dist-tags.latest` reports 7.0.2, but
-`package.json` pins 6.0.3.
+**Observe:** `package.json` lists `typescript` 6.0.3 and `typescript-native`
+(an npm alias for `typescript@7.0.2`). `node_modules/.bin/tsc` is whichever
+package npm linked last, so `npx tsc` may run either. `npm run typecheck`
+calls the 7.x binary by path.
 
-**Why:** the pinned `typescript-eslint` 8.72.0 declares the peer range
-`typescript >=4.8.4 <6.1.0`, and `npm install` fails with ERESOLVE against 7.x.
+**Why:** `typescript-eslint` 8.72.0 declares the peer range
+`typescript >=4.8.4 <6.1.0`, and eslint loads the TypeScript API from the
+`typescript` package, so `typescript` stays on 6.0.3. The native 7.x compiler
+has a different API but a working `tsc`, so type checking uses it. A planted
+type error fails under both compilers.
+`scripts/check-typescript-split.mjs` (run by `npm run check`) fails when
+`typescript-eslint` starts accepting 7.x, or when `typescript` drifts outside
+its range, and tells you which half to undo.
 
-**Becomes a bug if:** a `typescript-eslint` release widens the peer range to
-include 7.x and the pin stays behind.
+**Becomes a bug if:** you run `npx tsc` and trust it as the project's type
+check, or the split check is removed from `check`.

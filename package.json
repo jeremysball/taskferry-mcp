@@ -15,8 +15,9 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "lint": "npm exec --no -- eslint .",
-    "typecheck": "npm exec --no -- tsc --noEmit",
-    "check": "npm run format:check && npm run lint && npm run typecheck && npm test"
+    "typecheck": "node node_modules/typescript-native/bin/tsc --noEmit",
+    "check:typescript-split": "node scripts/check-typescript-split.mjs",
+    "check": "npm run format:check && npm run lint && npm run check:typescript-split && npm run typecheck && npm test"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
@@ -25,7 +26,9 @@
     "eslint-plugin-sonarjs": "4.2.0",
     "globals": "17.13.0",
     "prettier": "3.9.10",
+    "semver": "7.8.5",
     "typescript": "6.0.3",
-    "typescript-eslint": "8.72.0"
+    "typescript-eslint": "8.72.0",
+    "typescript-native": "npm:typescript@7.0.2"
   }
 }

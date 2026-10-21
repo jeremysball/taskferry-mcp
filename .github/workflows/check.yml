@@ -39,6 +39,9 @@ jobs:
       - name: Run lint
         run: npm run lint
 
+      - name: Check the TypeScript split
+        run: npm run check:typescript-split
+
       - name: Run typecheck
         run: npm run typecheck
 

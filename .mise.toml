@@ -18,7 +18,7 @@ depends = ["setup"]
 run = "npm test"
 
 [tasks.check]
-description = "Full gate: format check, lint, typecheck, unit tests. The pre-commit hook runs this; CI runs the same four steps separately"
+description = "Full gate: format check, lint, TypeScript split check, typecheck, unit tests. The pre-commit hook runs this; CI runs the same steps separately"
 depends = ["setup"]
 run = "npm run check"
 
