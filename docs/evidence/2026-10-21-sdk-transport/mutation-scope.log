@@ -1,0 +1,43 @@
+✔ initialize, discovery and daemon mapping, including fragmented socket responses (87.601187ms)
+✔ every tool schema is strict, and only dispatch is advertised as not read-only (8.159965ms)
+✔ the server does not claim it can push tool-list changes it has no session to send (31.656061ms)
+✔ the official SDK client can connect, list tools and call one (90.948351ms)
+✔ dispatch fails closed without configured allowlists (19.484242ms)
+✔ dispatch needs both allowlists, and an allowed model alone is not enough (34.160306ms)
+✔ rejects arbitrary daemon methods and invalid tool arguments (38.424375ms)
+✖ cross-workspace status is denied and result content is never requested (18.375941ms)
+✔ an in-scope task reads through to its result (32.055225ms)
+✔ a non-object daemon reply becomes a tool error instead of crashing the bridge (29.963268ms)
+✔ an unknown task id is indistinguishable from an out-of-scope one (36.338755ms)
+✔ other daemon failures still reach the caller, so an outage is not hidden (27.732003ms)
+✔ a multibyte character split across daemon socket chunks survives (51.58885ms)
+ℹ tests 13
+ℹ suites 0
+ℹ pass 12
+ℹ fail 1
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 704.003438
+
+✖ failing tests:
+
+test at test/tools.test.ts:160:1
+✖ cross-workspace status is denied and result content is never requested (18.375941ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  + actual - expected
+  
+  + undefined
+  - true
+  
+      at TestContext.<anonymous> (file:///home/jeremy/projects/taskferry-mcp-ts7/test/tools.test.ts:173:14)
+      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+      at async Test.run (node:internal/test_runner/test:1404:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:969:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: undefined,
+    expected: true,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }

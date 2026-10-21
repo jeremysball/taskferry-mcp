@@ -14,13 +14,14 @@
     "test:unit": "node --test \"test/**/*.test.ts\"",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "lint": "npm exec --no -- eslint .",
+    "lint": "eslint .",
     "typecheck": "node node_modules/typescript-native/bin/tsc --noEmit",
     "check:typescript-split": "node scripts/check-typescript-split.mjs",
     "check": "npm run format:check && npm run lint && npm run check:typescript-split && npm run typecheck && npm test"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
+    "@modelcontextprotocol/client": "2.3.1",
     "@types/node": "26.6.5",
     "eslint": "10.13.0",
     "eslint-plugin-sonarjs": "4.2.0",
@@ -30,5 +31,10 @@
     "typescript": "6.0.3",
     "typescript-eslint": "8.72.0",
     "typescript-native": "npm:typescript@7.0.2"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/node": "2.1.1",
+    "@modelcontextprotocol/server": "2.3.1",
+    "zod": "4.6.7"
   }
 }

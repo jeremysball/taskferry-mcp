@@ -1,0 +1,52 @@
+✖ the unix listener serves MCP on a socket only its owner can use (6.862191ms)
+✔ stopping the listener removes its socket file (8.015394ms)
+✖ a stale socket file left by a crash is replaced (35.13777ms)
+✔ a live instance already on the socket is never displaced (11.849011ms)
+✔ a regular file at the socket path is refused, not deleted (0.564556ms)
+✔ the tcp listener binds loopback only (7.464532ms)
+ℹ tests 6
+ℹ suites 0
+ℹ pass 4
+ℹ fail 2
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 253.47031
+
+✖ failing tests:
+
+test at test/listen.test.ts:25:1
+✖ the unix listener serves MCP on a socket only its owner can use (6.862191ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  
+  420 !== 384
+  
+      at TestContext.<anonymous> (file:///home/jeremy/projects/taskferry-mcp-ts7/test/listen.test.ts:32:12)
+      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+      at async Test.run (node:internal/test_runner/test:1404:7)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:387:3) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 420,
+    expected: 384,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at test/listen.test.ts:76:1
+✖ a stale socket file left by a crash is replaced (35.13777ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  
+  420 !== 384
+  
+      at TestContext.<anonymous> (file:///home/jeremy/projects/taskferry-mcp-ts7/test/listen.test.ts:87:12)
+      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+      at async Test.run (node:internal/test_runner/test:1404:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:969:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 420,
+    expected: 384,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }

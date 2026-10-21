@@ -1,0 +1,78 @@
+[setup] $ bash scripts/mise-setup-deps.sh
+[check] $ npm run check
+
+> taskferry-mcp-bridge@0.1.0 check
+> npm run format:check && npm run lint && npm run check:typescript-split && npm run typecheck && npm test
+
+
+> taskferry-mcp-bridge@0.1.0 format:check
+> prettier --check .
+
+Checking formatting...
+All matched files use Prettier code style!
+
+> taskferry-mcp-bridge@0.1.0 lint
+> eslint .
+
+
+> taskferry-mcp-bridge@0.1.0 check:typescript-split
+> node scripts/check-typescript-split.mjs
+
+
+> taskferry-mcp-bridge@0.1.0 typecheck
+> node node_modules/typescript-native/bin/tsc --noEmit
+
+
+> taskferry-mcp-bridge@0.1.0 test
+> npm run test:unit
+
+
+> taskferry-mcp-bridge@0.1.0 test:unit
+> node --test "test/**/*.test.ts"
+
+✔ defaults: the daemon socket and the listener both live in the XDG runtime dir (1.846317ms)
+✔ TASKFERRY_RUNTIME_DIR moves the daemon socket default, as it does for the daemon itself (0.260306ms)
+✔ precedence is flag over env over config key over default, for every knob (1.014325ms)
+✔ the config file can come from the flag, the env var, or the XDG default (0.709113ms)
+✔ a config file that was asked for but is missing, unreadable, or not an object fails (1.567026ms)
+✔ an unknown key in the config file is an error, so a typo cannot silently drop a knob (0.634879ms)
+✔ the token is never a config-file key or a flag, because both leak through ps and backups (0.572916ms)
+✔ the token comes from the env var or from a private file, never both, never neither (0.581447ms)
+✔ a token file anyone else can read, or that is empty, is refused (0.550422ms)
+✔ TCP loopback mode: a port picks it, and naming both listeners is a conflict (0.977759ms)
+✔ bad values fail loudly instead of falling back to a default (0.63516ms)
+✔ unauthenticated requests never touch the daemon, an authenticated read succeeds (78.981152ms)
+✔ only POST /mcp with a JSON body is served, and the answer is never cached (73.124848ms)
+✔ a malformed or oversized body is refused before any tool runs (4081.011614ms)
+✔ a multibyte character split across request chunks survives (40.124447ms)
+✔ on loopback TCP a foreign Host or any browser Origin is refused, even with the token (19.543539ms)
+✔ a request with no token is refused before its Host or Origin are weighed (26.135502ms)
+✔ the unix listener serves MCP on a socket only its owner can use (70.644415ms)
+✔ an existing listen directory keeps its mode (5.382696ms)
+✔ stopping the listener removes its socket file (20.43252ms)
+✔ a stale socket file left by a crash is replaced (74.350892ms)
+✔ a live instance already on the socket is never displaced (31.117245ms)
+✔ a regular file at the socket path is refused, not deleted (0.526553ms)
+✔ the tcp listener binds loopback only (52.795043ms)
+✔ initialize, discovery and daemon mapping, including fragmented socket responses (95.049481ms)
+✔ every tool schema is strict, and only dispatch is advertised as not read-only (29.280403ms)
+✔ the server does not claim it can push tool-list changes it has no session to send (84.420454ms)
+✔ the official SDK client can connect, list tools and call one (113.407634ms)
+✔ dispatch fails closed without configured allowlists (18.623839ms)
+✔ dispatch needs both allowlists, and an allowed model alone is not enough (36.213208ms)
+✔ rejects arbitrary daemon methods and invalid tool arguments (36.63668ms)
+✔ cross-workspace status is denied and result content is never requested (24.201401ms)
+✔ an in-scope task reads through to its result (26.992398ms)
+✔ a non-object daemon reply becomes a tool error instead of crashing the bridge (21.806443ms)
+✔ an unknown task id is indistinguishable from an out-of-scope one (33.481333ms)
+✔ other daemon failures still reach the caller, so an outage is not hidden (28.742941ms)
+✔ a multibyte character split across daemon socket chunks survives (51.073981ms)
+ℹ tests 37
+ℹ suites 0
+ℹ pass 37
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 4512.238294
+Finished in 6.97s

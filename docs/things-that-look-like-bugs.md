@@ -6,17 +6,20 @@ behavior, delete the entry.
 
 ## The bridge and gateway only accept loopback connections
 
-**Observe:** `curl http://<this-host's-LAN-or-tailnet-IP>:8787/mcp` is refused
-even with a valid token.
+**Observe:** with `--listen-port`, `curl http://<this-host's-LAN-or-tailnet-IP>:<port>/mcp`
+is refused even with a valid token. In the default mode there is no TCP port at
+all.
 
-**Why:** both entry points call `listen(port, '127.0.0.1')`
-(`src/server.ts`, `src/gateway.ts`). The README says never to expose the
+**Why:** the default listener is a Unix socket that only its owner can open
+(`src/listen.ts`). TCP mode binds `127.0.0.1` and refuses any request whose
+`Host` or `Origin` is not loopback (`src/server.ts`), which blocks DNS
+rebinding and cross-site browser requests before the MCP layer runs.
+`src/gateway.ts` also binds `127.0.0.1`. The README says never to expose the
 listener directly; reaching it from elsewhere is the job of an authenticated
 proxy in front.
 
-**Becomes a bug if:** a deployment guide tells people to reach the bridge
-directly, or a bind-address option is added without Host/Origin checks (there
-are none today).
+**Becomes a bug if:** a bind-address option lets TCP mode bind a non-loopback
+address, or the Host/Origin check is removed.
 
 ## Dispatch returns an error until both allowlists are set
 
@@ -52,8 +55,9 @@ points at a symlink or root-resolution problem, not at the intended case.
 **Why:** the daemon's own "unknown task id" error would let a caller probe
 which IDs exist outside their allowed directories. The scope guard maps the
 daemon's `UNKNOWN_TASK` code to the generic message (`inScopeStatus` in
-`src/server.ts`). Other daemon failures keep their own message so an outage is
-not mistaken for a permissions problem. Both are pinned by tests.
+`src/tools.ts`, backed by `src/scope.ts`). Other daemon failures keep their own
+message so an outage is not mistaken for a permissions problem. Both are
+pinned by tests.
 
 **Becomes a bug if:** the daemon renames the `UNKNOWN_TASK` code. Unknown IDs
 then leak the daemon's wording again. The tests cannot catch that: the stub
@@ -65,11 +69,25 @@ daemon's code is copied from the daemon's source, not read from a live one.
 error) returns status 200 with `result.isError: true`, not a 4xx.
 
 **Why:** MCP reports tool errors inside the JSON-RPC result so the model can
-read them. HTTP status is reserved for transport problems: 401 bad token, 404
-wrong path, 405 non-POST, 415 non-JSON, 400 malformed JSON-RPC.
+read them. HTTP status is reserved for transport problems: 400 malformed JSON,
+401 bad token, 403 foreign Host or Origin in TCP mode, 404 wrong path, 405
+non-POST, 413 body over 1 MiB, 415 non-JSON.
 
 **Becomes a bug if:** a transport-level failure (bad token, malformed body) is
 ever reported with 200.
+
+## A dead socket file at the listen path is deleted on startup
+
+**Observe:** starting the bridge removes an existing `mcp.sock` before binding
+it.
+
+**Why:** `socketIsLive` connects to the path. `ECONNREFUSED` or `ENOENT` means
+a dead process left the file behind, so `listenBridge` unlinks it. A path that
+is not a socket is refused and never deleted, and a live listener is refused
+with "already in use" (`src/listen.ts`).
+
+**Becomes a bug if:** a non-socket file disappears, or a second instance
+displaces a running one.
 
 ## Two TypeScript versions are installed
 
