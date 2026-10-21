@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdirSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import {
   HEALTH,
@@ -10,10 +12,12 @@ import {
   daemonError,
   fixture,
   okReply,
+  removeDir,
   rpc,
   splitInsideChar,
   startBridge,
   stubDaemon,
+  tempDir,
   toolCall,
 } from './helpers.ts';
 
@@ -28,6 +32,7 @@ test('initialize, discovery and daemon mapping, including fragmented socket resp
   try {
     const init = await call(f.url, rpc('initialize', INITIALIZE));
     assert.equal(init.result?.serverInfo?.name, 'taskferry-mcp');
+    assert.match(init.result?.instructions ?? '', /taskferry_dispatch/);
     const tools = await call(f.url, rpc('tools/list'));
     assert.deepEqual(tools.result?.tools?.map((t) => t.name).sort(), [
       'taskferry_dispatch',
@@ -135,6 +140,86 @@ test('dispatch needs both allowlists, and an allowed model alone is not enough',
   } finally {
     await bridge.close();
     await daemon.close();
+  }
+});
+
+test('read-only binds are allowlisted, resolved and forwarded only when requested', async () => {
+  const daemon = await stubDaemon((req) => okReply(req, { id: 'new-task' }));
+  const allowedDir = tempDir('tf-ro-bind-');
+  const outsideDir = tempDir('tf-ro-bind-outside-');
+  const allowedFile = path.join(allowedDir, 'auth.json');
+  const outsideFile = path.join(outsideDir, 'secret');
+  const missing = path.join(allowedDir, 'missing');
+  const link = path.join(allowedDir, 'link');
+  const subDir = path.join(allowedDir, 'sub');
+  const settings = path.join(subDir, 'settings.json');
+  mkdirSync(subDir);
+  const emptyJson = '{}';
+  writeFileSync(allowedFile, emptyJson);
+  writeFileSync(outsideFile, 'secret');
+  writeFileSync(settings, emptyJson);
+  symlinkSync(outsideFile, link);
+  const realAllowedFile = realpathSync(allowedFile);
+  const model = 'good';
+  const bridge = await startBridge(daemon.socket, {
+    allowDirectories: [daemon.dir],
+    allowModels: [model],
+    allowRoBinds: [allowedFile, subDir],
+  });
+  const dispatch = (roBind: string[]) =>
+    call(
+      bridge.url,
+      toolCall('taskferry_dispatch', {
+        directory: daemon.dir,
+        prompt: 'hi',
+        roBind,
+        model,
+      }),
+    );
+  try {
+    for (const denied of [outsideFile, link, missing, 'relative/path']) {
+      const res = await dispatch([denied]);
+      assert.equal(res.result?.isError, true, `${denied} must be refused`);
+    }
+    assert.equal(daemon.calls.length, 0);
+
+    const allowed = await dispatch([allowedFile, settings]);
+    assert.notEqual(allowed.result?.isError, true);
+    assert.equal(daemon.calls.length, 1);
+    assert.deepEqual(daemon.calls[0]?.params.roBind, [realAllowedFile, realpathSync(settings)]);
+
+    const withoutBind = await call(
+      bridge.url,
+      toolCall('taskferry_dispatch', { directory: daemon.dir, prompt: 'hi', model }),
+    );
+    assert.notEqual(withoutBind.result?.isError, true);
+    assert.equal(daemon.calls[1]?.params.roBind, undefined);
+  } finally {
+    await bridge.close();
+    await daemon.close();
+    removeDir(allowedDir);
+    removeDir(outsideDir);
+  }
+});
+
+test('a read-only bind is refused when the bind allowlist is empty', async () => {
+  const f = await fixture();
+  const file = path.join(f.dir, 'auth.json');
+  writeFileSync(file, '{}');
+  try {
+    const res = await call(
+      f.url,
+      toolCall('taskferry_dispatch', {
+        directory: f.dir,
+        model: 'good',
+        prompt: 'hi',
+        roBind: [file],
+      }),
+    );
+    assert.equal(res.result?.isError, true);
+    assert.equal(f.calls.length, 0);
+  } finally {
+    await f.close();
   }
 });
 

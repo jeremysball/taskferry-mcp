@@ -38,6 +38,7 @@ test('defaults: the daemon socket and the listener both live in the XDG runtime 
   assert.deepEqual(c.listen, { kind: 'unix', path: '/run/user/9/taskferry-mcp/mcp.sock' });
   assert.deepEqual(c.allowDirectories, []);
   assert.deepEqual(c.allowModels, []);
+  assert.deepEqual(c.allowRoBinds, []);
   assert.equal(c.token, 'secret');
 });
 
@@ -53,24 +54,28 @@ test('precedence is flag over env over config key over default, for every knob',
       daemonSocket: '/from/file.sock',
       allowedDirectories: ['/file-a', '/file-b'],
       allowedModels: ['file-model'],
+      allowedRoBinds: ['/file-bind'],
       listenSocket: '/from/file-listen.sock',
     });
     const fromFile = resolve(['--config', file]);
     assert.equal(fromFile.daemonSocket, '/from/file.sock');
     assert.deepEqual(fromFile.allowDirectories, ['/file-a', '/file-b']);
     assert.deepEqual(fromFile.allowModels, ['file-model']);
+    assert.deepEqual(fromFile.allowRoBinds, ['/file-bind']);
     assert.deepEqual(fromFile.listen, { kind: 'unix', path: '/from/file-listen.sock' });
 
     const env = {
       TASKFERRY_SOCKET_PATH: '/from/env.sock',
       TASKFERRY_ALLOWED_DIRECTORIES: '/env-a:/env-b',
       TASKFERRY_ALLOWED_MODELS: 'env-1,env-2',
+      TASKFERRY_ALLOWED_RO_BINDS: '/env-bind',
       TASKFERRY_MCP_LISTEN_SOCKET: '/from/env-listen.sock',
     };
     const fromEnv = resolve(['--config', file], env);
     assert.equal(fromEnv.daemonSocket, '/from/env.sock');
     assert.deepEqual(fromEnv.allowDirectories, ['/env-a', '/env-b']);
     assert.deepEqual(fromEnv.allowModels, ['env-1', 'env-2']);
+    assert.deepEqual(fromEnv.allowRoBinds, ['/env-bind']);
     assert.deepEqual(fromEnv.listen, { kind: 'unix', path: '/from/env-listen.sock' });
 
     const fromFlag = resolve(
@@ -83,6 +88,8 @@ test('precedence is flag over env over config key over default, for every knob',
         '/flag-a',
         '--allowed-models',
         'flag-1',
+        '--allowed-ro-binds',
+        '/flag-bind',
         '--listen-socket',
         '/from/flag-listen.sock',
       ],
@@ -91,6 +98,7 @@ test('precedence is flag over env over config key over default, for every knob',
     assert.equal(fromFlag.daemonSocket, '/from/flag.sock');
     assert.deepEqual(fromFlag.allowDirectories, ['/flag-a']);
     assert.deepEqual(fromFlag.allowModels, ['flag-1']);
+    assert.deepEqual(fromFlag.allowRoBinds, ['/flag-bind']);
     assert.deepEqual(fromFlag.listen, { kind: 'unix', path: '/from/flag-listen.sock' });
   });
 });
@@ -188,6 +196,15 @@ test('TCP loopback mode: a port picks it, and naming both listeners is a conflic
       port: PORT,
     });
   });
+});
+
+test('read-only bind roots must be absolute and cannot be the filesystem root', () => {
+  assert.deepEqual(resolve([], { TASKFERRY_ALLOWED_RO_BINDS: '/a:/b' }).allowRoBinds, ['/a', '/b']);
+  assert.throws(
+    () => resolve([], { TASKFERRY_ALLOWED_RO_BINDS: 'relative/path' }),
+    /must be an absolute path/,
+  );
+  assert.throws(() => resolve([], { TASKFERRY_ALLOWED_RO_BINDS: '/' }), /filesystem root/);
 });
 
 test('bad values fail loudly instead of falling back to a default', () => {

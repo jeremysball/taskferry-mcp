@@ -10,6 +10,7 @@ export type BridgeConfig = {
   token: string;
   allowDirectories: string[];
   allowModels: string[];
+  allowRoBinds: string[];
   listen: Listen;
 };
 
@@ -29,6 +30,7 @@ const FLAGS = {
   'daemon-socket': { type: 'string' },
   'allowed-directories': { type: 'string' },
   'allowed-models': { type: 'string' },
+  'allowed-ro-binds': { type: 'string' },
   'listen-socket': { type: 'string' },
   'listen-port': { type: 'string' },
   'token-file': { type: 'string' },
@@ -38,6 +40,7 @@ const FILE_KEYS = [
   'daemonSocket',
   'allowedDirectories',
   'allowedModels',
+  'allowedRoBinds',
   'listenSocket',
   'listenPort',
   'tokenFile',
@@ -116,6 +119,16 @@ function asList(name: string, value: unknown, separator: string): string[] {
   if (typeof value === 'string') return value.split(separator).filter(Boolean);
   if (Array.isArray(value) && value.every((v) => typeof v === 'string' && v !== '')) return value;
   throw new ConfigError(`${name} must be a list of non-empty strings`);
+}
+
+function asBindRoots(name: string, value: unknown): string[] {
+  return asList(name, value, ':').map((entry) => {
+    const root = absolute(name, entry);
+    if (root === path.parse(root).root) {
+      throw new ConfigError(`${name} must not be the filesystem root`);
+    }
+    return root;
+  });
 }
 
 function asPort(name: string, value: unknown): number {
@@ -227,6 +240,11 @@ export function resolveConfig({ argv, env }: { argv: string[]; env: Env }): Brid
     fromEnv(env, 'TASKFERRY_ALLOWED_MODELS'),
     file.allowedModels,
   );
+  const roBinds = firstFound<unknown>(
+    flags['allowed-ro-binds'],
+    fromEnv(env, 'TASKFERRY_ALLOWED_RO_BINDS'),
+    file.allowedRoBinds,
+  );
   const tokenFile = firstFound<unknown>(
     flags['token-file'],
     fromEnv(env, 'TASKFERRY_MCP_TOKEN_FILE'),
@@ -242,6 +260,7 @@ export function resolveConfig({ argv, env }: { argv: string[]; env: Env }): Brid
         )
       : [],
     allowModels: models ? asList('allowed models', models.value, ',') : [],
+    allowRoBinds: roBinds ? asBindRoots('allowed read-only binds', roBinds.value) : [],
     listen: resolveListen(flags, env, file),
   };
 }

@@ -7,6 +7,11 @@ import { listenBridge } from './listen.ts';
 import { registerTools } from './tools.ts';
 
 const SERVER_INFO = { name: 'taskferry-mcp', version: '0.1.0' } as const;
+const INSTRUCTIONS = `TaskFerry queues background coding tasks on a host daemon. A dispatch returns an id immediately and does not wait for work.
+Typical flow: call taskferry_list to see recent ids, taskferry_dispatch to queue work, then poll taskferry_status until the task reports done, crashed or cancelled, and finally call taskferry_result.
+taskferry_status and taskferry_result only see tasks whose directory is on the bridge workspace allowlist. taskferry_dispatch requires an allowlisted directory and model.
+roBind is optional: it exposes host files or directories read-only inside the task sandbox, and each requested path must already be on the bridge read-only bind allowlist. Use it for credentials or shared config, never for broad filesystem access.
+Dispatch has no idempotency key, so do not retry an ambiguous dispatch automatically.`;
 const MAX_REQUEST_BYTES = 1024 * 1024;
 const BEARER = 'Bearer ';
 const LOOPBACK_HOSTNAMES = new Set(['localhost', '127.0.0.1', '[::1]']);
@@ -66,11 +71,15 @@ function refuse(res: http.ServerResponse, status: number) {
 // One MCP server and transport per request. The transport is stateless (no session ID), and JSON
 // responses keep the bridge a plain request/response endpoint rather than an event stream.
 async function serveMcp(req: http.IncomingMessage, res: http.ServerResponse, config: BridgeConfig) {
-  const server = new McpServer(SERVER_INFO, { capabilities: { tools: { listChanged: false } } });
+  const server = new McpServer(SERVER_INFO, {
+    capabilities: { tools: { listChanged: false } },
+    instructions: INSTRUCTIONS,
+  });
   registerTools(server, {
     daemonSocket: config.daemonSocket,
     allowDirectories: config.allowDirectories,
     allowModels: config.allowModels,
+    allowRoBinds: config.allowRoBinds,
   });
   const transport = new NodeStreamableHTTPServerTransport({
     enableJsonResponse: true,

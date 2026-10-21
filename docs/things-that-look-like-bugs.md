@@ -107,3 +107,18 @@ its range, and tells you which half to undo.
 
 **Becomes a bug if:** you run `npx tsc` and trust it as the project's type
 check, or the split check is removed from `check`.
+
+## A read-only bind lands at the same path, not a path the caller chooses
+
+**Observe:** `roBind: ["/host/credential.json"]` exposes that file at
+`/host/credential.json` inside the task sandbox. There is no bridge argument
+for mounting it at a different path.
+
+**Why:** the bridge forwards `roBind` to TaskFerry's `task.dispatch`, whose
+entries are host paths bound read-only at the same path. The bridge resolves
+and allowlists the source; destination remapping is not part of the daemon
+surface it can reach. A caller that needs the file at another path has to get
+it there some other way.
+
+**Becomes a bug if:** the daemon starts accepting `source:destination` pairs
+and the bridge still refuses or drops them.

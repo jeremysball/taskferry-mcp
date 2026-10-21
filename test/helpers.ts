@@ -17,6 +17,7 @@ export type Reply = {
     isError?: boolean;
     content?: { type: string; text: string }[];
     serverInfo?: { name: string };
+    instructions?: string;
     capabilities?: { tools?: { listChanged?: boolean } };
     tools?: {
       name: string;
@@ -96,6 +97,7 @@ export async function startBridge(daemonSocket: string, overrides: Partial<Bridg
     token: TOKEN,
     allowDirectories: [],
     allowModels: [],
+    allowRoBinds: [],
     listen: { kind: 'tcp', port: 0 },
     ...overrides,
   });

@@ -19,6 +19,7 @@ const config = (daemonSocket: string, listenPath: string) => ({
   token: 'correct-secret',
   allowDirectories: [],
   allowModels: [],
+  allowRoBinds: [],
   listen: { kind: 'unix' as const, path: listenPath },
 });
 
