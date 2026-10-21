@@ -1,6 +1,6 @@
 # TaskFerry MCP Bridge
 
-**Status:** mock-tested prototype. The suite runs against a stub daemon and real loopback listeners. Nobody has run the bridge against a real TaskFerry daemon or a real Sites client, and it is not production-ready.
+**Status:** working prototype, validated once against a local TaskFerry daemon. The suite runs against a stub daemon and real loopback listeners; a live pass covered all five tools, including one real dispatch and its result. It is not production-ready and has not been run behind a real Sites client.
 
 ## Architecture
 
@@ -76,11 +76,11 @@ npm run gateway
 
 `taskferry_status` and `taskferry_result` read `task.status` and check the canonical `directory` against the allowed roots before they return status or request result content. A missing or unresolvable directory fails closed. The check lives in `src/scope.ts` and runs from `src/tools.ts`.
 
-An unknown task ID and an out-of-scope one both answer "task not accessible", which keeps a caller from probing IDs outside its roots. That mapping depends on the daemon's `UNKNOWN_TASK` error code, read from its source but never exercised against a running daemon.
+An unknown task ID and an out-of-scope one both answer "task not accessible", which keeps a caller from probing IDs outside its roots. A live pass confirmed that mapping against the running daemon.
 
 ## Limitations / next gates
 
-- Real TaskFerry integration is untested. The exact `task.dispatch` parameters may differ from the stub, so dispatch stays disabled until both allowlists are set and the call is validated.
+- Real TaskFerry integration has one live pass: health, list, status, result, dispatch, and the dispatched task's result. Queue behavior under load, concurrent clients, non-default executors, and long-running tasks are still untested. Dispatch stays disabled until both allowlists are set.
 - MCP compatibility is verified against the official SDK client and raw JSON-RPC over HTTP. The bridge answers with JSON only, so a client that requires SSE or sessions will fail.
 - The suite has 37 cases and does not cover the B01-B18 matrix from the design plan, which is not in this repo.
 - Dispatch has no durable idempotency. Do not retry an ambiguous failure automatically.
@@ -96,4 +96,4 @@ An unknown task ID and an out-of-scope one both answer "task not accessible", wh
 - `mutation.log`: a change to daemon method forwarding failed one test, then was reverted.
 - `scope-red.log`, `scope-green.log`, `scope-mutation.log`, `scope-final.log`: the same sequence for the scope guard.
 
-`docs/evidence/2026-10-21-sdk-transport/` holds this refactor's gate output (`check.log`), two mutation probes (`mutation-scope.log`, `mutation-socket-mode.log`), and a CLI smoke run (`smoke.log`).
+`docs/evidence/2026-10-21-sdk-transport/` holds this refactor's gate output (`check.log`), two mutation probes (`mutation-scope.log`, `mutation-socket-mode.log`), a CLI smoke run (`smoke.log`), and a live daemon pass (`real-daemon.log`) covering all five tools and one dispatch (`oc_mvi1xlws_1804d533`) that returned `MCP_REAL_DISPATCH_OK`.

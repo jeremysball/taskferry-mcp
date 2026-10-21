@@ -1,6 +1,6 @@
 # taskferry-mcp
 
-HTTP MCP bridge to a local TaskFerry daemon. Prototype: mock-tested only, never run against a real daemon. Read `README.md` for the architecture and the open gaps, `docs/adr/` for why it is a separate repo.
+HTTP MCP bridge to a local TaskFerry daemon. Validated once against a local TaskFerry daemon; not production-ready. Read `README.md` for the architecture and the open gaps, `docs/adr/` for why it is a separate repo.
 
 ## Commands
 
