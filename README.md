@@ -1,6 +1,6 @@
 # TaskFerry MCP Bridge
 
-**Status:** working prototype, validated once against a local TaskFerry daemon. The suite runs against a stub daemon and real loopback listeners; a live pass covered all five tools, including one real dispatch and its result. It is not production-ready and has not been run behind a real Sites client.
+**Status:** working prototype, validated against a local TaskFerry daemon. The suite runs against a stub daemon and real loopback listeners; a live pass covered the task tools, including one real dispatch and its result. It is not production-ready and has not been run behind a real Sites client.
 
 ## Architecture
 
@@ -10,19 +10,20 @@ The bridge is TypeScript run directly by Node's native type stripping, so there 
 
 ## Tools
 
-Five tools, each hard-wired to one daemon method. A caller cannot name a daemon method directly.
+Six tools, each hard-wired to one daemon method. A caller cannot name a daemon method directly.
 
-| Tool                 | Daemon method   | Notes                                    |
-| -------------------- | --------------- | ---------------------------------------- |
-| `taskferry_health`   | `system.health` |                                          |
-| `taskferry_list`     | `task.list`     | Needs `TASKFERRY_ALLOWED_DIRECTORIES`    |
-| `taskferry_status`   | `task.status`   | Scope-guarded                            |
-| `taskferry_result`   | `task.result`   | Scope-guarded; status is read first      |
-| `taskferry_dispatch` | `task.dispatch` | Needs both allowlists; optional `roBind` |
+| Tool                 | Daemon method   | Notes                                                 |
+| -------------------- | --------------- | ----------------------------------------------------- |
+| `taskferry_health`   | `system.health` |                                                       |
+| `taskferry_list`     | `task.list`     | All allowed workspaces by default; optional directory |
+| `taskferry_status`   | `task.status`   | Scope-guarded; full lifecycle fields                  |
+| `taskferry_result`   | `task.result`   | Scope-guarded; optional `fields` and `full`           |
+| `taskferry_summary`  | `task.summary`  | Scope-guarded; queues a summary task                  |
+| `taskferry_dispatch` | `task.dispatch` | Needs both allowlists; optional `roBind`              |
 
 ## Run tests
 
-`mise run check` runs the full gate: format check, lint, the TypeScript split check, `tsc --noEmit`, and 40 unit tests. CI runs the same steps. `npm test` runs only the tests.
+`mise run check` runs the full gate: format check, lint, the TypeScript split check, `tsc --noEmit`, and 43 unit tests. CI runs the same steps. `npm test` runs only the tests.
 
 The tests start a real stub daemon on a Unix socket and real HTTP listeners on loopback. Two mutation probes are kept in the evidence directory: disabling the scope guard fails the cross-workspace test, and loosening the socket mode fails the permissions test.
 
@@ -76,17 +77,21 @@ npm run gateway
 
 ## Scope guard
 
-`taskferry_status` and `taskferry_result` read `task.status` and check the canonical `directory` against the allowed roots before they return status or request result content. A missing or unresolvable directory fails closed. The check lives in `src/scope.ts` and runs from `src/tools.ts`.
+`taskferry_status`, `taskferry_result` and `taskferry_summary` read `task.status` and check the canonical `directory` against the allowed roots before they return status, request result content or queue a summary. A missing or unresolvable directory fails closed. The check lives in `src/scope.ts` and runs from `src/tools.ts`.
+
+`taskferry_list` without a directory asks the daemon for its newest 500 tasks and filters the rows through the same allowed roots. Passing a directory scopes the list to that workspace, which must itself be under an allowed root.
 
 An unknown task ID and an out-of-scope one both answer "task not accessible", which keeps a caller from probing IDs outside its roots. A live pass confirmed that mapping against the running daemon.
+
+`taskferry_result` accepts `fields` to select result fields and `full` to return the complete narration. `taskferry_summary` wraps `task.summary`: it returns a queued summary task in `summaryTask`, and the caller polls `taskferry_status` and reads `taskferry_result` against that id. `mode: "activity"` reads cached activity without spawning a worker; `mode: "report"` (the default) queues a summarizer.
 
 `taskferry_dispatch` accepts an optional `roBind` array of absolute host paths. Each path is resolved with `realpathSync` and must be on the read-only bind allowlist, either as the exact file or under an allowed directory. The bridge forwards the resolved paths to the daemon as `roBind`, which mounts each one read-only at the same path inside the task sandbox. There is no read-write bind surface.
 
 ## Limitations / next gates
 
-- Real TaskFerry integration has one live pass: health, list, status, result, dispatch, and the dispatched task's result. Queue behavior under load, concurrent clients, non-default executors, and long-running tasks are still untested. Dispatch stays disabled until both allowlists are set, and read-only binds stay disabled until the bind allowlist is set.
+- Real TaskFerry integration live passes cover health, list, status, result, summary, dispatch, and dispatched-task results. Queue behavior under load, concurrent clients, non-default executors, and very long summaries are still untested. Dispatch stays disabled until both allowlists are set, and read-only binds stay disabled until the bind allowlist is set.
 - MCP compatibility is verified against the official SDK client and raw JSON-RPC over HTTP. The bridge answers with JSON only, so a client that requires SSE or sessions will fail.
-- The suite has 40 cases and does not cover the B01-B18 matrix from the design plan, which is not in this repo.
+- The suite has 43 cases and does not cover the B01-B18 matrix from the design plan, which is not in this repo.
 - Dispatch has no durable idempotency. Do not retry an ambiguous failure automatically.
 - `gateway.ts` is a Node.js prototype. A Sites-native handler and a real deployment need the Sites runtime and API.
 - Validate input schemas, HTTP limits, authentication, dispatch restrictions, CSRF and origin posture, audit logging, secret rotation, and response truncation before production.
@@ -100,4 +105,4 @@ An unknown task ID and an out-of-scope one both answer "task not accessible", wh
 - `mutation.log`: a change to daemon method forwarding failed one test, then was reverted.
 - `scope-red.log`, `scope-green.log`, `scope-mutation.log`, `scope-final.log`: the same sequence for the scope guard.
 
-`docs/evidence/2026-10-21-sdk-transport/` holds this refactor's gate output (`check.log`), two mutation probes (`mutation-scope.log`, `mutation-socket-mode.log`), a CLI smoke run (`smoke.log`), and a live daemon pass (`real-daemon.log`) covering all five tools and one dispatch (`oc_mvi1xlws_1804d533`) that returned `MCP_REAL_DISPATCH_OK`.
+`docs/evidence/2026-10-21-sdk-transport/` holds this refactor's gate output (`check.log`), two mutation probes (`mutation-scope.log`, `mutation-socket-mode.log`), a CLI smoke run (`smoke.log`), and a live daemon pass (`real-daemon.log`) covering the task tools and one dispatch (`oc_mvi1xlws_1804d533`) that returned `MCP_REAL_DISPATCH_OK`.

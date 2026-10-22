@@ -40,9 +40,13 @@ test('initialize, discovery and daemon mapping, including fragmented socket resp
       'taskferry_list',
       'taskferry_result',
       'taskferry_status',
+      'taskferry_summary',
     ]);
     const result = await call(f.url, toolCall('taskferry_list'));
-    assert.deepEqual(JSON.parse(result.result?.content?.[0]?.text ?? ''), { tasks: [] });
+    assert.deepEqual(JSON.parse(result.result?.content?.[0]?.text ?? ''), {
+      counts: { queued: 0, running: 0, done: 0, crashed: 0, cancelled: 0, unknown: 0 },
+      tasks: [],
+    });
     assert.equal(f.calls.length, 1);
     assert.equal(f.calls[0]?.method, 'task.list');
   } finally {
@@ -50,16 +54,17 @@ test('initialize, discovery and daemon mapping, including fragmented socket resp
   }
 });
 
-test('every tool schema is strict, and only dispatch is advertised as not read-only', async () => {
+test('every tool schema is strict, and only dispatch and summary are not read-only', async () => {
   const f = await fixture();
   try {
     const tools = (await call(f.url, rpc('tools/list'))).result?.tools ?? [];
-    assert.equal(tools.length, 5);
+    assert.equal(tools.length, 6);
+    const writes = new Set(['taskferry_dispatch', 'taskferry_summary']);
     for (const tool of tools) {
       assert.equal(tool.inputSchema.additionalProperties, false, `${tool.name} accepts extra keys`);
       assert.equal(
         tool.annotations?.readOnlyHint,
-        tool.name !== 'taskferry_dispatch',
+        !writes.has(tool.name),
         `${tool.name} readOnlyHint`,
       );
     }
@@ -87,7 +92,7 @@ test('the official SDK client can connect, list tools and call one', async () =>
         requestInit: { headers: { authorization: `Bearer ${TOKEN}` } },
       }),
     );
-    assert.equal((await client.listTools()).tools.length, 5);
+    assert.equal((await client.listTools()).tools.length, 6);
     const result = await client.callTool({ name: HEALTH, arguments: {} });
     assert.notEqual(result.isError, true);
     assert.deepEqual(result.content, [{ type: 'text', text: JSON.stringify({ healthy: true }) }]);
@@ -236,13 +241,23 @@ test('rejects arbitrary daemon methods and invalid tool arguments', async () => 
     assert.equal(missing.result?.isError, true);
     const wrongType = await call(f.url, toolCall(STATUS_TOOL, { taskId: 7 }));
     assert.equal(wrongType.result?.isError, true);
+    const badField = await call(
+      f.url,
+      toolCall('taskferry_result', { taskId: 'abc', fields: ['secret'] }),
+    );
+    assert.equal(badField.result?.isError, true);
+    const shortSummary = await call(
+      f.url,
+      toolCall('taskferry_summary', { taskId: 'abc', maxWords: 74 }),
+    );
+    assert.equal(shortSummary.result?.isError, true);
     assert.equal(f.calls.length, 0);
   } finally {
     await f.close();
   }
 });
 
-test('cross-workspace status is denied and result content is never requested', async () => {
+test('cross-workspace status, result and summary are denied before content is requested', async () => {
   const daemon = await stubDaemon((req) =>
     okReply(
       req,
@@ -253,15 +268,44 @@ test('cross-workspace status is denied and result content is never requested', a
   );
   const bridge = await startBridge(daemon.socket, { allowDirectories: [daemon.dir] });
   try {
-    for (const name of [STATUS_TOOL, 'taskferry_result']) {
+    for (const name of [STATUS_TOOL, 'taskferry_result', 'taskferry_summary']) {
       const response = await call(bridge.url, toolCall(name, { taskId: 'foreign-task' }));
       assert.equal(response.result?.isError, true);
       assert.doesNotMatch(JSON.stringify(response), /SECRET|private\/other-project/);
     }
     assert.deepEqual(
       daemon.calls.map((c) => c.method),
-      [TASK_STATUS, TASK_STATUS],
+      [TASK_STATUS, TASK_STATUS, TASK_STATUS],
     );
+  } finally {
+    await bridge.close();
+    await daemon.close();
+  }
+});
+
+test('list without a directory shows only rows inside allowed workspaces', async () => {
+  let root = '';
+  const daemon = await stubDaemon((req) =>
+    okReply(req, {
+      counts: { queued: 0, running: 0, done: 2, crashed: 0, cancelled: 0, unknown: 0 },
+      tasks: [
+        { id: 'inside', status: 'done', directory: root },
+        { id: 'outside', status: 'done', directory: '/private/other-project' },
+      ],
+    }),
+  );
+  root = daemon.dir;
+  const bridge = await startBridge(daemon.socket, { allowDirectories: [daemon.dir] });
+  try {
+    const res = await call(bridge.url, toolCall('taskferry_list'));
+    assert.notEqual(res.result?.isError, true);
+    const body = JSON.parse(res.result?.content?.[0]?.text ?? '');
+    assert.deepEqual(
+      body.tasks.map((task: { id: string }) => task.id),
+      ['inside'],
+    );
+    assert.equal(body.counts.done, 1);
+    assert.deepEqual(daemon.calls[0]?.params, {});
   } finally {
     await bridge.close();
     await daemon.close();
@@ -294,6 +338,72 @@ test('an in-scope task reads through to its result', async () => {
   }
 });
 
+test('result forwards field projection and full narration', async () => {
+  let root = '';
+  const daemon = await stubDaemon((req) =>
+    okReply(
+      req,
+      req.method === TASK_STATUS
+        ? { id: req.params.taskId, directory: root, status: 'done' }
+        : { message: 'DONE', tokens: 12 },
+    ),
+  );
+  root = daemon.dir;
+  const bridge = await startBridge(daemon.socket, { allowDirectories: [daemon.dir] });
+  try {
+    const res = await call(
+      bridge.url,
+      toolCall('taskferry_result', {
+        taskId: 'mine',
+        full: true,
+        fields: ['narration', 'tokens'],
+      }),
+    );
+    assert.notEqual(res.result?.isError, true);
+    assert.deepEqual(daemon.calls[1]?.params, {
+      taskId: 'mine',
+      full: true,
+      fields: ['narration', 'tokens'],
+    });
+  } finally {
+    await bridge.close();
+    await daemon.close();
+  }
+});
+
+test('summary is scoped and forwards its mode and word budget', async () => {
+  let root = '';
+  const daemon = await stubDaemon((req) =>
+    okReply(
+      req,
+      req.method === TASK_STATUS
+        ? { id: req.params.taskId, directory: root, status: 'done' }
+        : { summaryTask: { id: 'summary-1', status: 'queued' } },
+    ),
+  );
+  root = daemon.dir;
+  const bridge = await startBridge(daemon.socket, { allowDirectories: [daemon.dir] });
+  try {
+    const res = await call(
+      bridge.url,
+      toolCall('taskferry_summary', { taskId: 'mine', mode: 'activity', maxWords: 75 }),
+    );
+    assert.notEqual(res.result?.isError, true);
+    assert.deepEqual(
+      daemon.calls.map((c) => c.method),
+      [TASK_STATUS, 'task.summary'],
+    );
+    assert.deepEqual(daemon.calls[1]?.params, {
+      taskId: 'mine',
+      mode: 'activity',
+      maxWords: 75,
+    });
+  } finally {
+    await bridge.close();
+    await daemon.close();
+  }
+});
+
 test('a non-object daemon reply becomes a tool error instead of crashing the bridge', async () => {
   const daemon = await stubDaemon(() => 'null\n');
   const bridge = await startBridge(daemon.socket);
@@ -313,7 +423,7 @@ test('an unknown task id is indistinguishable from an out-of-scope one', async (
   );
   const bridge = await startBridge(daemon.socket, { allowDirectories: [daemon.dir] });
   try {
-    for (const name of [STATUS_TOOL, 'taskferry_result']) {
+    for (const name of [STATUS_TOOL, 'taskferry_result', 'taskferry_summary']) {
       const res = await call(bridge.url, toolCall(name, { taskId: 'nope' }));
       assert.equal(res.result?.isError, true);
       assert.equal(res.result?.content?.[0]?.text, 'task not accessible');

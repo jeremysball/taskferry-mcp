@@ -16,12 +16,57 @@ const TASK_STATUS = 'task.status';
 const UNKNOWN_TASK = 'UNKNOWN_TASK';
 const NOT_ACCESSIBLE = 'task not accessible';
 const ALLOWLIST_REQUIRED = 'workspace allowlist required';
+const LIST_ROW_CAP = 500;
+
+const RESULT_FIELDS = [
+  'message',
+  'narration',
+  'tokens',
+  'cost',
+  'sessionId',
+  'exitCode',
+  'signal',
+  'spawnError',
+  'failureReason',
+  'failureDetail',
+  'logPath',
+  'outputDir',
+  'incomplete',
+  'finalMarker',
+  'finalStatus',
+  'class',
+  'diff',
+  'diffStat',
+  'changesetError',
+  'checkStatus',
+  'checkCommand',
+  'checkExitCode',
+  'checkOutputTail',
+  'checkStartedAt',
+  'checkEndedAt',
+  'checkOverride',
+  'parentTaskId',
+  'projectConfigWarning',
+  'prompt',
+  'promptAugmented',
+] as const;
+const STATUSES = ['queued', 'running', 'done', 'crashed', 'cancelled', 'unknown'] as const;
 
 // Every schema is strict (`additionalProperties: false`), and a required string must hold
 // something other than whitespace. The pattern keeps the value as sent, unlike `.trim()`.
 const nonBlank = z.string().regex(/\S/, 'must not be blank');
 const taskArgs = z.strictObject({ taskId: nonBlank });
 const roBinds = z.array(nonBlank).max(32).optional();
+const resultArgs = z.strictObject({
+  taskId: nonBlank,
+  full: z.boolean().optional(),
+  fields: z.array(z.enum(RESULT_FIELDS)).min(1).optional(),
+});
+const summaryArgs = z.strictObject({
+  taskId: nonBlank,
+  mode: z.enum(['report', 'activity']).optional(),
+  maxWords: z.number().int().min(75).max(300).optional(),
+});
 
 const READ_ONLY = { readOnlyHint: true, openWorldHint: false } as const;
 const WRITES = { readOnlyHint: false, destructiveHint: false, openWorldHint: false } as const;
@@ -47,6 +92,75 @@ async function inScopeStatus(taskId: string, scope: ToolScope) {
     throw new Error(NOT_ACCESSIBLE);
   }
   return current;
+}
+
+function isVisibleRow(row: unknown, roots: readonly string[]): row is Json {
+  if (typeof row !== 'object' || row === null) return false;
+  const directory = (row as Json).directory;
+  return typeof directory === 'string' && inAllowedRoot(roots, directory);
+}
+
+function countStatuses(rows: readonly Json[]) {
+  const counts: Record<string, number> = Object.fromEntries(STATUSES.map((status) => [status, 0]));
+  for (const row of rows) {
+    const status = row.status;
+    if (typeof status === 'string' && status in counts) counts[status] += 1;
+  }
+  return counts;
+}
+
+// Lists without a directory return every task the daemon still holds, capped at its newest 500
+// rows. Filter those rows through the same allowlist the direct lookup uses, so the all-workspace
+// view cannot expose a workspace the bridge was not configured for.
+function visibleList(result: unknown, roots: readonly string[]) {
+  const tasks = (result as Json | null)?.tasks;
+  if (!Array.isArray(tasks)) return result;
+  const rows = tasks.filter((row): row is Json => isVisibleRow(row, roots));
+  return {
+    counts: countStatuses(rows),
+    tasks: rows,
+    ...(tasks.length >= LIST_ROW_CAP ? { note: 'newest 500 rows across allowed workspaces' } : {}),
+  };
+}
+
+async function listTasks(args: { directory?: string }, scope: ToolScope) {
+  if (!scope.allowDirectories.length) throw new Error(ALLOWLIST_REQUIRED);
+  if (args.directory === undefined) {
+    return visibleList(
+      await callDaemon(scope.daemonSocket, 'task.list', {}),
+      scope.allowDirectories,
+    );
+  }
+  let real: string;
+  try {
+    real = realpathSync(args.directory);
+  } catch {
+    throw new Error('directory unavailable');
+  }
+  if (!inAllowedRoot(scope.allowDirectories, real)) throw new Error('directory denied');
+  return callDaemon(scope.daemonSocket, 'task.list', { directory: real });
+}
+
+type ResultArgs = { taskId: string; full?: boolean; fields?: readonly string[] };
+
+async function readResult(args: ResultArgs, scope: ToolScope) {
+  await inScopeStatus(args.taskId, scope);
+  return callDaemon(scope.daemonSocket, 'task.result', {
+    taskId: args.taskId,
+    ...(args.full === undefined ? {} : { full: args.full }),
+    ...(args.fields === undefined ? {} : { fields: args.fields }),
+  });
+}
+
+type SummaryArgs = { taskId: string; mode?: 'report' | 'activity'; maxWords?: number };
+
+async function summarize(args: SummaryArgs, scope: ToolScope) {
+  await inScopeStatus(args.taskId, scope);
+  return callDaemon(scope.daemonSocket, 'task.summary', {
+    taskId: args.taskId,
+    ...(args.mode === undefined ? {} : { mode: args.mode }),
+    ...(args.maxWords === undefined ? {} : { maxWords: args.maxWords }),
+  });
 }
 
 // Resolve each requested read-only bind against the bridge allowlist. Resolving symlinks before
@@ -100,7 +214,7 @@ async function dispatchTask(args: DispatchArgs, scope: ToolScope) {
   });
 }
 
-// Registers the five TaskFerry tools on `server`. Nothing else is reachable: a tool name is the
+// Registers the six TaskFerry tools on `server`. Nothing else is reachable: a tool name is the
 // only way to a daemon method, and each handler fixes which method it sends.
 export function registerTools(server: McpServer, scope: ToolScope) {
   server.registerTool(
@@ -118,18 +232,11 @@ export function registerTools(server: McpServer, scope: ToolScope) {
     'taskferry_list',
     {
       description:
-        "List tasks in an allowed workspace, newest first. Each row carries the task's id, status, model, executor and timestamps; use the id with taskferry_status or taskferry_result.",
+        'List recent tasks across all allowed workspaces, newest first, capped at 500 rows. Pass directory to scope the list to one allowed workspace. Each row carries id, status, model, startedAt, directory and failureReason; use taskferry_status for full lifecycle and log fields.',
       inputSchema: z.strictObject({ directory: nonBlank.optional() }),
       annotations: READ_ONLY,
     },
-    async (args) => {
-      if (!scope.allowDirectories.length) throw new Error(ALLOWLIST_REQUIRED);
-      const directory = args.directory ?? scope.allowDirectories[0];
-      if (directory === undefined || !scope.allowDirectories.includes(directory)) {
-        throw new Error('directory denied');
-      }
-      return asText(await callDaemon(scope.daemonSocket, 'task.list', { directory }));
-    },
+    async (args) => asText(await listTasks(args, scope)),
   );
 
   server.registerTool(
@@ -147,14 +254,22 @@ export function registerTools(server: McpServer, scope: ToolScope) {
     'taskferry_result',
     {
       description:
-        'Read a settled task final message and result metadata. This first reads task status to enforce the workspace allowlist.',
-      inputSchema: taskArgs,
+        'Read a settled task final message and result metadata. fields selects specific result fields; full returns the complete narration and requires narration in fields. This first reads task status to enforce the workspace allowlist.',
+      inputSchema: resultArgs,
       annotations: READ_ONLY,
     },
-    async ({ taskId }) => {
-      await inScopeStatus(taskId, scope);
-      return asText(await callDaemon(scope.daemonSocket, 'task.result', { taskId }));
+    async (args) => asText(await readResult(args, scope)),
+  );
+
+  server.registerTool(
+    'taskferry_summary',
+    {
+      description:
+        'Create a bounded summary task for a task. Returns a queued summary task id in summaryTask; poll taskferry_status then taskferry_result on that id. mode activity reads cached activity without spawning; report (default) queues a summarizer.',
+      inputSchema: summaryArgs,
+      annotations: WRITES,
     },
+    async (args) => asText(await summarize(args, scope)),
   );
 
   server.registerTool(
