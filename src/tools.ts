@@ -119,7 +119,9 @@ function visibleList(result: unknown, roots: readonly string[]) {
   return {
     counts: countStatuses(rows),
     tasks: rows,
-    ...(tasks.length >= LIST_ROW_CAP ? { note: 'newest 500 rows across allowed workspaces' } : {}),
+    ...(tasks.length >= LIST_ROW_CAP
+      ? { note: 'daemon row cap reached; older tasks may be omitted' }
+      : {}),
   };
 }
 
