@@ -3,6 +3,7 @@ import path from 'node:path';
 import { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import { DaemonError, callDaemon, type Json } from './daemon.ts';
+import { listOpencodeModels } from './models.ts';
 import { inAllowedRoot } from './scope.ts';
 
 export type ToolScope = {
@@ -12,11 +13,16 @@ export type ToolScope = {
   allowRoBinds: readonly string[];
 };
 
+export type ToolDeps = {
+  listModels: () => Promise<string[]>;
+};
+
 const TASK_STATUS = 'task.status';
 const UNKNOWN_TASK = 'UNKNOWN_TASK';
 const NOT_ACCESSIBLE = 'task not accessible';
 const ALLOWLIST_REQUIRED = 'workspace allowlist required';
 const LIST_ROW_CAP = 500;
+const MODEL_ROW_CAP = 50;
 
 const RESULT_FIELDS = [
   'message',
@@ -66,6 +72,10 @@ const summaryArgs = z.strictObject({
   taskId: nonBlank,
   mode: z.enum(['report', 'activity']).optional(),
   maxWords: z.number().int().min(75).max(300).optional(),
+});
+const modelArgs = z.strictObject({
+  query: nonBlank.max(200).optional(),
+  limit: z.number().int().min(1).max(200).optional(),
 });
 
 const READ_ONLY = { readOnlyHint: true, openWorldHint: false } as const;
@@ -143,6 +153,37 @@ async function listTasks(args: { directory?: string }, scope: ToolScope) {
   return callDaemon(scope.daemonSocket, 'task.list', { directory: real });
 }
 
+type ModelArgs = { query?: string; limit?: number };
+
+async function catalogModels(args: ModelArgs, scope: ToolScope, load: ToolDeps['listModels']) {
+  const installed = await load();
+  const installedSet = new Set(installed);
+  const missingAllowedModels = scope.allowModels.filter((model) => !installedSet.has(model));
+  const query = args.query?.toLowerCase();
+  const candidates = query
+    ? installed
+    : scope.allowModels.filter((model) => installedSet.has(model));
+  const matches = candidates.filter(
+    (model) => query === undefined || model.toLowerCase().includes(query),
+  );
+  const limit = args.limit ?? MODEL_ROW_CAP;
+  const notes: string[] = [];
+  if (scope.allowModels.length === 0) notes.push('model allowlist is empty; dispatch is disabled');
+  if (matches.length > limit) notes.push(`showing first ${limit} of ${matches.length} matches`);
+  return {
+    allowedModels: [...scope.allowModels],
+    missingAllowedModels,
+    totalInstalledModels: installed.length,
+    query: args.query ?? null,
+    matched: matches.length,
+    models: matches.slice(0, limit).map((id) => ({
+      id,
+      allowed: scope.allowModels.includes(id),
+    })),
+    ...(notes.length ? { note: notes.join('; ') } : {}),
+  };
+}
+
 type ResultArgs = { taskId: string; full?: boolean; fields?: readonly string[] };
 
 async function readResult(args: ResultArgs, scope: ToolScope) {
@@ -191,34 +232,57 @@ type DispatchArgs = {
   directory: string;
   model: string;
   prompt: string;
+  variant?: string;
   roBind?: readonly string[];
 };
 
-async function dispatchTask(args: DispatchArgs, scope: ToolScope) {
-  if (!scope.allowDirectories.length || !scope.allowModels.length) {
-    throw new Error('dispatch disabled until allowlists configured');
+function resolveDispatchDirectory(directory: string, scope: ToolScope) {
+  if (!scope.allowDirectories.length) {
+    throw new Error('dispatch disabled: workspace allowlist is empty');
   }
   let real: string;
   try {
-    real = realpathSync(args.directory);
+    real = realpathSync(directory);
   } catch {
-    throw new Error('directory unavailable');
+    throw new Error(`workspace unavailable: ${directory}`);
   }
-  if (!inAllowedRoot(scope.allowDirectories, real) || !scope.allowModels.includes(args.model)) {
-    throw new Error('directory or model denied');
+  if (!inAllowedRoot(scope.allowDirectories, real)) {
+    throw new Error(
+      `workspace denied: ${real} is outside allowed roots (${scope.allowDirectories.join(', ')})`,
+    );
   }
+  return real;
+}
+
+function assertAllowedModel(model: string, scope: ToolScope) {
+  if (!scope.allowModels.length) {
+    throw new Error('dispatch disabled: model allowlist is empty');
+  }
+  if (!scope.allowModels.includes(model)) {
+    throw new Error(
+      `model denied: ${model} is not allowed; allowed models: ${scope.allowModels.join(', ')}`,
+    );
+  }
+}
+
+async function dispatchTask(args: DispatchArgs, scope: ToolScope) {
+  const real = resolveDispatchDirectory(args.directory, scope);
+  assertAllowedModel(args.model, scope);
   const readOnlyBinds = resolveRoBinds(args.roBind, scope);
   return callDaemon(scope.daemonSocket, 'task.dispatch', {
     directory: real,
     model: args.model,
     prompt: args.prompt,
+    ...(args.variant === undefined ? {} : { variant: args.variant }),
     ...(readOnlyBinds.length ? { roBind: readOnlyBinds } : {}),
   });
 }
 
-// Registers the six TaskFerry tools on `server`. Nothing else is reachable: a tool name is the
-// only way to a daemon method, and each handler fixes which method it sends.
-export function registerTools(server: McpServer, scope: ToolScope) {
+// Registers the seven TaskFerry tools on `server`. Nothing else is reachable: a tool name is the
+// only way to a daemon method, and each handler fixes which method it sends. `taskferry_models`
+// is the one handler that runs a local command instead of a daemon method.
+export function registerTools(server: McpServer, scope: ToolScope, deps: Partial<ToolDeps> = {}) {
+  const listModels = deps.listModels ?? listOpencodeModels;
   server.registerTool(
     'taskferry_health',
     {
@@ -239,6 +303,17 @@ export function registerTools(server: McpServer, scope: ToolScope) {
       annotations: READ_ONLY,
     },
     async (args) => asText(await listTasks(args, scope)),
+  );
+
+  server.registerTool(
+    'taskferry_models',
+    {
+      description:
+        'List OpenCode model ids and mark which ones the bridge allows. With no query, returns allowed models only. With query, searches the full installed catalog. missingAllowedModels names allowlisted ids that are not installed.',
+      inputSchema: modelArgs,
+      annotations: READ_ONLY,
+    },
+    async (args) => asText(await catalogModels(args, scope, listModels)),
   );
 
   server.registerTool(
@@ -278,11 +353,12 @@ export function registerTools(server: McpServer, scope: ToolScope) {
     'taskferry_dispatch',
     {
       description:
-        'Queue a background task and return its id immediately. Poll taskferry_status until it settles, then read taskferry_result. directory must be an allowed workspace and model an allowed model. roBind optionally exposes host paths read-only inside the task sandbox; every path must be on the bridge read-only bind allowlist.',
+        'Queue a background task and return its id immediately. Poll taskferry_status until it settles, then read taskferry_result. directory must be an allowed workspace and model an allowed model; call taskferry_models to see allowed ids. variant sets the model reasoning level, for example low, high, xhigh, max, highest, or a model-specific name; omit it for the TaskFerry default. roBind optionally exposes host paths read-only inside the task sandbox; every path must be on the bridge read-only bind allowlist.',
       inputSchema: z.strictObject({
         directory: nonBlank,
         model: nonBlank,
         prompt: nonBlank,
+        variant: nonBlank.max(64).optional(),
         roBind: roBinds,
       }),
       annotations: WRITES,

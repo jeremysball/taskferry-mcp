@@ -10,20 +10,21 @@ The bridge is TypeScript run directly by Node's native type stripping, so there 
 
 ## Tools
 
-Six tools, each hard-wired to one daemon method. A caller cannot name a daemon method directly.
+Seven tools. Six are hard-wired to one daemon method; `taskferry_models` runs the local `opencode models` command. A caller cannot name a daemon method directly.
 
-| Tool                 | Daemon method   | Notes                                                 |
-| -------------------- | --------------- | ----------------------------------------------------- |
-| `taskferry_health`   | `system.health` |                                                       |
-| `taskferry_list`     | `task.list`     | All allowed workspaces by default; optional directory |
-| `taskferry_status`   | `task.status`   | Scope-guarded; full lifecycle fields                  |
-| `taskferry_result`   | `task.result`   | Scope-guarded; optional `fields` and `full`           |
-| `taskferry_summary`  | `task.summary`  | Scope-guarded; queues a summary task                  |
-| `taskferry_dispatch` | `task.dispatch` | Needs both allowlists; optional `roBind`              |
+| Tool                 | Source            | Notes                                                  |
+| -------------------- | ----------------- | ------------------------------------------------------ |
+| `taskferry_health`   | `system.health`   |                                                        |
+| `taskferry_list`     | `task.list`       | All allowed workspaces by default; optional directory  |
+| `taskferry_models`   | `opencode models` | Allowed ids, missing allowlist entries, optional query |
+| `taskferry_status`   | `task.status`     | Scope-guarded; full lifecycle fields                   |
+| `taskferry_result`   | `task.result`     | Scope-guarded; optional `fields` and `full`            |
+| `taskferry_summary`  | `task.summary`    | Scope-guarded; queues a summary task                   |
+| `taskferry_dispatch` | `task.dispatch`   | Needs both allowlists; optional `variant` and `roBind` |
 
 ## Run tests
 
-`mise run check` runs the full gate: format check, lint, the TypeScript split check, `tsc --noEmit`, and 43 unit tests. CI runs the same steps. `npm test` runs only the tests.
+`mise run check` runs the full gate: format check, lint, the TypeScript split check, `tsc --noEmit`, and 45 unit tests. CI runs the same steps. `npm test` runs only the tests.
 
 The tests start a real stub daemon on a Unix socket and real HTTP listeners on loopback. Two mutation probes are kept in the evidence directory: disabling the scope guard fails the cross-workspace test, and loosening the socket mode fails the permissions test.
 
@@ -85,13 +86,17 @@ An unknown task ID and an out-of-scope one both answer "task not accessible", wh
 
 `taskferry_result` accepts `fields` to select result fields and `full` to return the complete narration. `taskferry_summary` wraps `task.summary`: it returns a queued summary task in `summaryTask`, and the caller polls `taskferry_status` and reads `taskferry_result` against that id. `mode: "activity"` reads cached activity without spawning a worker; `mode: "report"` (the default) queues a summarizer.
 
-`taskferry_dispatch` accepts an optional `roBind` array of absolute host paths. Each path is resolved with `realpathSync` and must be on the read-only bind allowlist, either as the exact file or under an allowed directory. The bridge forwards the resolved paths to the daemon as `roBind`, which mounts each one read-only at the same path inside the task sandbox. There is no read-write bind surface.
+`taskferry_models` shells out to `opencode models` and caches the result for 60 seconds. Without a query it returns the allowlisted model ids only. With a query it searches the full installed catalog and marks each match as allowed or not. `missingAllowedModels` names allowlisted ids that are not installed, which catches an allowlist typo before a dispatch fails.
+
+`taskferry_dispatch` accepts an optional `variant` string for the model reasoning level, for example `low`, `high`, `xhigh`, `max`, or `highest`; it forwards the value to the daemon as `variant` and omits it when unset. A denied request says whether the workspace or the model failed and includes the allowed models.
+
+`taskferry_dispatch` also accepts an optional `roBind` array of absolute host paths. Each path is resolved with `realpathSync` and must be on the read-only bind allowlist, either as the exact file or under an allowed directory. The bridge forwards the resolved paths to the daemon as `roBind`, which mounts each one read-only at the same path inside the task sandbox. There is no read-write bind surface.
 
 ## Limitations / next gates
 
 - Real TaskFerry integration live passes cover health, list, status, result, summary, dispatch, and dispatched-task results. Queue behavior under load, concurrent clients, non-default executors, and very long summaries are still untested. Dispatch stays disabled until both allowlists are set, and read-only binds stay disabled until the bind allowlist is set.
 - MCP compatibility is verified against the official SDK client and raw JSON-RPC over HTTP. The bridge answers with JSON only, so a client that requires SSE or sessions will fail.
-- The suite has 43 cases and does not cover the B01-B18 matrix from the design plan, which is not in this repo.
+- The suite has 45 cases and does not cover the B01-B18 matrix from the design plan, which is not in this repo.
 - Dispatch has no durable idempotency. Do not retry an ambiguous failure automatically.
 - `gateway.ts` is a Node.js prototype. A Sites-native handler and a real deployment need the Sites runtime and API.
 - Validate input schemas, HTTP limits, authentication, dispatch restrictions, CSRF and origin posture, audit logging, secret rotation, and response truncation before production.

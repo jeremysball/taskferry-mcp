@@ -38,6 +38,7 @@ test('initialize, discovery and daemon mapping, including fragmented socket resp
       'taskferry_dispatch',
       'taskferry_health',
       'taskferry_list',
+      'taskferry_models',
       'taskferry_result',
       'taskferry_status',
       'taskferry_summary',
@@ -58,7 +59,7 @@ test('every tool schema is strict, and only dispatch and summary are not read-on
   const f = await fixture();
   try {
     const tools = (await call(f.url, rpc('tools/list'))).result?.tools ?? [];
-    assert.equal(tools.length, 6);
+    assert.equal(tools.length, 7);
     const writes = new Set(['taskferry_dispatch', 'taskferry_summary']);
     for (const tool of tools) {
       assert.equal(tool.inputSchema.additionalProperties, false, `${tool.name} accepts extra keys`);
@@ -92,7 +93,7 @@ test('the official SDK client can connect, list tools and call one', async () =>
         requestInit: { headers: { authorization: `Bearer ${TOKEN}` } },
       }),
     );
-    assert.equal((await client.listTools()).tools.length, 6);
+    assert.equal((await client.listTools()).tools.length, 7);
     const result = await client.callTool({ name: HEALTH, arguments: {} });
     assert.notEqual(result.isError, true);
     assert.deepEqual(result.content, [{ type: 'text', text: JSON.stringify({ healthy: true }) }]);
@@ -142,6 +143,75 @@ test('dispatch needs both allowlists, and an allowed model alone is not enough',
       daemon.calls.map((c) => c.method),
       ['task.dispatch'],
     );
+  } finally {
+    await bridge.close();
+    await daemon.close();
+  }
+});
+
+test('models lists allowed ids, marks missing entries, and searches the catalog', async () => {
+  const daemon = await stubDaemon((req) => okReply(req, { healthy: true }));
+  const model = 'good';
+  const missing = 'missing/model';
+  const bridge = await startBridge(
+    daemon.socket,
+    { allowModels: [model, missing] },
+    { listModels: async () => [model, 'other/model', 'wild/model'] },
+  );
+  try {
+    const allowed = await call(bridge.url, toolCall('taskferry_models', {}));
+    const body = JSON.parse(allowed.result?.content?.[0]?.text ?? '{}');
+    assert.deepEqual(body.allowedModels, [model, missing]);
+    assert.deepEqual(body.missingAllowedModels, [missing]);
+    assert.deepEqual(body.models, [{ id: model, allowed: true }]);
+    assert.equal(body.totalInstalledModels, 3);
+
+    const searched = await call(bridge.url, toolCall('taskferry_models', { query: 'wild' }));
+    const match = JSON.parse(searched.result?.content?.[0]?.text ?? '{}');
+    assert.deepEqual(match.models, [{ id: 'wild/model', allowed: false }]);
+    assert.equal(match.matched, 1);
+  } finally {
+    await bridge.close();
+    await daemon.close();
+  }
+});
+
+test('dispatch names the denied side and forwards the reasoning variant', async () => {
+  const daemon = await stubDaemon((req) => okReply(req, { id: 'new-task' }));
+  const bridge = await startBridge(daemon.socket, {
+    allowDirectories: [daemon.dir],
+    allowModels: ['good'],
+  });
+  try {
+    const badModel = await call(
+      bridge.url,
+      toolCall('taskferry_dispatch', {
+        directory: daemon.dir,
+        model: 'bad',
+        prompt: 'hi',
+      }),
+    );
+    const modelError = badModel.result?.content?.[0]?.text ?? '';
+    assert.match(modelError, /model denied: bad/);
+    assert.match(modelError, /allowed models: good/);
+
+    const badDirectory = await call(
+      bridge.url,
+      toolCall('taskferry_dispatch', { directory: '/', model: 'good', prompt: 'hi' }),
+    );
+    assert.match(badDirectory.result?.content?.[0]?.text ?? '', /workspace denied:/);
+
+    const ok = await call(
+      bridge.url,
+      toolCall('taskferry_dispatch', {
+        directory: daemon.dir,
+        model: 'good',
+        prompt: 'hi',
+        variant: 'high',
+      }),
+    );
+    assert.notEqual(ok.result?.isError, true);
+    assert.equal(daemon.calls[0]?.params.variant, 'high');
   } finally {
     await bridge.close();
     await daemon.close();

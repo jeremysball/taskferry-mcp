@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { BridgeConfig } from '../src/config.ts';
+import type { ToolDeps } from '../src/tools.ts';
 import { createBridge } from '../src/server.ts';
 
 export const TOKEN = 'correct-secret';
@@ -91,16 +92,23 @@ export const daemonError = (id: string, code: string, message: string) =>
   }) + '\n';
 
 // Starts a bridge on a free loopback port in front of `daemonSocket` and resolves to its /mcp URL.
-export async function startBridge(daemonSocket: string, overrides: Partial<BridgeConfig> = {}) {
-  const bridge = createBridge({
-    daemonSocket,
-    token: TOKEN,
-    allowDirectories: [],
-    allowModels: [],
-    allowRoBinds: [],
-    listen: { kind: 'tcp', port: 0 },
-    ...overrides,
-  });
+export async function startBridge(
+  daemonSocket: string,
+  overrides: Partial<BridgeConfig> = {},
+  deps: Partial<ToolDeps> = {},
+) {
+  const bridge = createBridge(
+    {
+      daemonSocket,
+      token: TOKEN,
+      allowDirectories: [],
+      allowModels: [],
+      allowRoBinds: [],
+      listen: { kind: 'tcp', port: 0 },
+      ...overrides,
+    },
+    deps,
+  );
   const url = await serve(bridge);
   return { url, close: () => stop(bridge) };
 }
