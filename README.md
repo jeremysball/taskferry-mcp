@@ -136,7 +136,7 @@ walk the full message without confirming.
 
 ## Limitations / next gates
 
-- Real TaskFerry integration live passes cover health, list, status, result, summary, dispatch, and dispatched-task results. Queue behavior under load, concurrent clients, non-default executors, and very long summaries are still untested. Dispatch stays disabled until both allowlists are set, and read-only binds stay disabled until the bind allowlist is set.
+- Real TaskFerry integration live passes cover health, list, status, result, message, worktree, summary, dispatch, and dispatched-task results. Changeset accept/reject and cancel are unit-tested against the stub only, because a live call would mutate a real workspace. Queue behavior under load, concurrent clients, non-default executors, and very long summaries are still untested. Dispatch stays disabled until both allowlists are set, and read-only binds stay disabled until the bind allowlist is set.
 - MCP compatibility is verified against the official SDK client and raw JSON-RPC over HTTP. The bridge answers with JSON only, so a client that requires SSE or sessions will fail.
 - The suite has 48 cases and does not cover the B01-B18 matrix from the design plan, which is not in this repo.
 - Dispatch has no durable idempotency. Do not retry an ambiguous failure automatically.
