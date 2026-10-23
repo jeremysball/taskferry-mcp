@@ -13,16 +13,20 @@ HTTP MCP bridge to a local TaskFerry daemon. Validated once against a local Task
 - `src/server.ts`: HTTP layer (path, auth, method, content type, Host/Origin, MCP transport) and the CLI entry.
 - `src/listen.ts`: Unix socket and loopback TCP listeners, including socket permissions and stale-socket replacement.
 - `src/config.ts`: flag/env/config-file precedence, defaults, and token resolution.
-- `src/tools.ts`: the five tools, their strict schemas, and the dispatch allowlist checks.
+- `src/tools.ts`: the seven core tools, their strict schemas, and the dispatch allowlist checks.
+- `src/tools-shared.ts`: shared tool scope, annotations, and task-status helpers.
+- `src/tools-changeset.ts`: `taskferry_accept`, `taskferry_reject`, `taskferry_cancel`.
+- `src/tools-message.ts`: `taskferry_message`, the confirmed full-message reader.
+- `src/tools-worktree.ts`: `taskferry_worktree`, the scoped read-only file viewer.
 - `src/scope.ts`: allowed-root check for task directories.
 - `src/daemon.ts`: Unix socket client for the TaskFerry protocol.
 - `src/gateway.ts`: loopback forwarding gateway demo.
-- `test/http.test.ts`, `test/listen.test.ts`, `test/tools.test.ts`, `test/config.test.ts`: tests against a stub daemon on a Unix socket and real loopback HTTP listeners.
+- `test/http.test.ts`, `test/listen.test.ts`, `test/tools.test.ts`, `test/tools-extra.test.ts`, `test/config.test.ts`: tests against a stub daemon on a Unix socket and real loopback HTTP listeners.
 - `docs/evidence/`: run logs. Do not edit them.
 
 ## Rules specific to this repo
 
 - The daemon wire protocol is owned by TaskFerry (`src/protocol.js` there: `{version: 1, id, method, params}` requests, `{version: 1, ok, id, result | error}` replies). Check that file, not this repo's stub daemon, when the two disagree.
-- Anything that touches a path from a caller must go through the allowlist and `realpathSync` checks in `src/scope.ts` and the handlers in `src/tools.ts`. A new tool that forwards a caller-supplied directory or task ID needs a test that proves it is refused outside the allowed roots.
+- Anything that touches a path from a caller must go through the allowlist and `realpathSync` checks in `src/scope.ts` and the tool modules. A new tool that forwards a caller-supplied directory or task ID needs a test that proves it is refused outside the allowed roots.
 - Pinned versions are exact. `typescript` stays on 6.x for eslint while `typescript-native` (7.x) runs `tsc`; `npm run check:typescript-split` says when to merge them (`docs/things-that-look-like-bugs.md`). Use `npm run typecheck`, not `npx tsc`.
 - Behavior a reader would call a bug but is deliberate goes in `docs/things-that-look-like-bugs.md` in the same change.

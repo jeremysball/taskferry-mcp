@@ -35,13 +35,18 @@ test('initialize, discovery and daemon mapping, including fragmented socket resp
     assert.match(init.result?.instructions ?? '', /taskferry_dispatch/);
     const tools = await call(f.url, rpc('tools/list'));
     assert.deepEqual(tools.result?.tools?.map((t) => t.name).sort(), [
+      'taskferry_accept',
+      'taskferry_cancel',
       'taskferry_dispatch',
       'taskferry_health',
       'taskferry_list',
+      'taskferry_message',
       'taskferry_models',
+      'taskferry_reject',
       'taskferry_result',
       'taskferry_status',
       'taskferry_summary',
+      'taskferry_worktree',
     ]);
     const result = await call(f.url, toolCall('taskferry_list'));
     assert.deepEqual(JSON.parse(result.result?.content?.[0]?.text ?? ''), {
@@ -55,12 +60,18 @@ test('initialize, discovery and daemon mapping, including fragmented socket resp
   }
 });
 
-test('every tool schema is strict, and only dispatch and summary are not read-only', async () => {
+test('every tool schema is strict, and only the write tools are not read-only', async () => {
   const f = await fixture();
   try {
     const tools = (await call(f.url, rpc('tools/list'))).result?.tools ?? [];
-    assert.equal(tools.length, 7);
-    const writes = new Set(['taskferry_dispatch', 'taskferry_summary']);
+    assert.equal(tools.length, 12);
+    const writes = new Set([
+      'taskferry_accept',
+      'taskferry_cancel',
+      'taskferry_dispatch',
+      'taskferry_reject',
+      'taskferry_summary',
+    ]);
     for (const tool of tools) {
       assert.equal(tool.inputSchema.additionalProperties, false, `${tool.name} accepts extra keys`);
       assert.equal(
@@ -93,7 +104,7 @@ test('the official SDK client can connect, list tools and call one', async () =>
         requestInit: { headers: { authorization: `Bearer ${TOKEN}` } },
       }),
     );
-    assert.equal((await client.listTools()).tools.length, 7);
+    assert.equal((await client.listTools()).tools.length, 12);
     const result = await client.callTool({ name: HEALTH, arguments: {} });
     assert.notEqual(result.isError, true);
     assert.deepEqual(result.content, [{ type: 'text', text: JSON.stringify({ healthy: true }) }]);

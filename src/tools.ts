@@ -2,25 +2,22 @@ import { realpathSync } from 'node:fs';
 import path from 'node:path';
 import { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
-import { DaemonError, callDaemon, type Json } from './daemon.ts';
+import { callDaemon, type Json } from './daemon.ts';
 import { listOpencodeModels } from './models.ts';
 import { inAllowedRoot } from './scope.ts';
+import {
+  ALLOWLIST_REQUIRED,
+  READ_ONLY,
+  WRITES,
+  asText,
+  inScopeStatus,
+  nonBlank,
+  type ToolDeps,
+  type ToolScope,
+} from './tools-shared.ts';
 
-export type ToolScope = {
-  daemonSocket: string;
-  allowDirectories: readonly string[];
-  allowModels: readonly string[];
-  allowRoBinds: readonly string[];
-};
+export type { ToolDeps, ToolScope } from './tools-shared.ts';
 
-export type ToolDeps = {
-  listModels: () => Promise<string[]>;
-};
-
-const TASK_STATUS = 'task.status';
-const UNKNOWN_TASK = 'UNKNOWN_TASK';
-const NOT_ACCESSIBLE = 'task not accessible';
-const ALLOWLIST_REQUIRED = 'workspace allowlist required';
 const LIST_ROW_CAP = 500;
 const MODEL_ROW_CAP = 50;
 
@@ -58,9 +55,6 @@ const RESULT_FIELDS = [
 ] as const;
 const STATUSES = ['queued', 'running', 'done', 'crashed', 'cancelled', 'unknown'] as const;
 
-// Every schema is strict (`additionalProperties: false`), and a required string must hold
-// something other than whitespace. The pattern keeps the value as sent, unlike `.trim()`.
-const nonBlank = z.string().regex(/\S/, 'must not be blank');
 const taskArgs = z.strictObject({ taskId: nonBlank });
 const roBinds = z.array(nonBlank).max(32).optional();
 const resultArgs = z.strictObject({
@@ -77,32 +71,6 @@ const modelArgs = z.strictObject({
   query: nonBlank.max(200).optional(),
   limit: z.number().int().min(1).max(200).optional(),
 });
-
-const READ_ONLY = { readOnlyHint: true, openWorldHint: false } as const;
-const WRITES = { readOnlyHint: false, destructiveHint: false, openWorldHint: false } as const;
-
-const asText = (value: unknown) => ({
-  content: [{ type: 'text' as const, text: JSON.stringify(value) }],
-});
-
-// Reads the task's status and refuses unless its directory is inside an allowed root.
-async function inScopeStatus(taskId: string, scope: ToolScope) {
-  if (!scope.allowDirectories.length) throw new Error(ALLOWLIST_REQUIRED);
-  let current: unknown;
-  try {
-    current = await callDaemon(scope.daemonSocket, TASK_STATUS, { taskId });
-  } catch (e) {
-    // The daemon's own "unknown task id" would tell a caller which IDs exist.
-    if (e instanceof DaemonError && e.code === UNKNOWN_TASK)
-      throw new Error(NOT_ACCESSIBLE, { cause: e });
-    throw e;
-  }
-  const directory = (current as Json | null)?.directory;
-  if (typeof directory !== 'string' || !inAllowedRoot(scope.allowDirectories, directory)) {
-    throw new Error(NOT_ACCESSIBLE);
-  }
-  return current;
-}
 
 function isVisibleRow(row: unknown, roots: readonly string[]): row is Json {
   if (typeof row !== 'object' || row === null) return false;

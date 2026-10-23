@@ -4,7 +4,10 @@ import { NodeStreamableHTTPServerTransport } from '@modelcontextprotocol/node';
 import { McpServer } from '@modelcontextprotocol/server';
 import { resolveConfig, type BridgeConfig } from './config.ts';
 import { listenBridge } from './listen.ts';
+import { registerChangesetTools } from './tools-changeset.ts';
+import { registerMessageTool } from './tools-message.ts';
 import { registerTools, type ToolDeps } from './tools.ts';
+import { registerWorktreeTool } from './tools-worktree.ts';
 
 const SERVER_INFO = { name: 'taskferry-mcp', version: '0.1.0' } as const;
 const INSTRUCTIONS = `TaskFerry queues background coding tasks on a host daemon. A dispatch returns an id immediately and does not wait for work.
@@ -12,6 +15,9 @@ Typical flow: call taskferry_list to see recent ids, taskferry_dispatch to queue
 taskferry_list without a directory covers every allowed workspace; pass directory to narrow it. taskferry_status and taskferry_result only see tasks whose directory is on the bridge workspace allowlist. taskferry_dispatch requires an allowlisted directory and model.
 Call taskferry_models to see allowed model ids; pass query to search the full installed OpenCode catalog. It reports missingAllowedModels when an allowlisted id is not installed.
 taskferry_result accepts fields to select result fields and full to return the complete narration. taskferry_summary queues a bounded summary task: poll taskferry_status and read taskferry_result on the returned summaryTask id. mode activity reads cached activity without spawning a worker.
+taskferry_message reads a task final message without truncation: without confirm it returns only the length and a short preview; call again with confirm: true, using offset and limit to page a long message.
+taskferry_accept applies a pending changeset to its workspace; taskferry_reject refuses and discards it; taskferry_cancel stops a queued or running task. All three are scope-guarded and write-capable.
+taskferry_worktree lists or reads files inside a task dispatch directory, read-only, with paths confined to that directory.
 taskferry_dispatch accepts variant to set the model reasoning level; omit it for the TaskFerry default.
 roBind is optional: it exposes host files or directories read-only inside the task sandbox, and each requested path must already be on the bridge read-only bind allowlist. Use it for credentials or shared config, never for broad filesystem access.
 Dispatch has no idempotency key, so do not retry an ambiguous dispatch automatically.`;
@@ -83,16 +89,16 @@ async function serveMcp(
     capabilities: { tools: { listChanged: false } },
     instructions: INSTRUCTIONS,
   });
-  registerTools(
-    server,
-    {
-      daemonSocket: config.daemonSocket,
-      allowDirectories: config.allowDirectories,
-      allowModels: config.allowModels,
-      allowRoBinds: config.allowRoBinds,
-    },
-    deps,
-  );
+  const scope = {
+    daemonSocket: config.daemonSocket,
+    allowDirectories: config.allowDirectories,
+    allowModels: config.allowModels,
+    allowRoBinds: config.allowRoBinds,
+  };
+  registerTools(server, scope, deps);
+  registerChangesetTools(server, scope);
+  registerWorktreeTool(server, scope);
+  registerMessageTool(server, scope);
   const transport = new NodeStreamableHTTPServerTransport({
     enableJsonResponse: true,
     maxRequestBodySize: MAX_REQUEST_BYTES,

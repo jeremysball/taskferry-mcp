@@ -122,3 +122,57 @@ it there some other way.
 
 **Becomes a bug if:** the daemon starts accepting `source:destination` pairs
 and the bridge still refuses or drops them.
+
+## `taskferry_message` withholds the full message until `confirm: true`
+
+**Observe:** calling `taskferry_message` with only a `taskId` returns
+`messageChars` and a 500-character preview, not the message. Sending `offset`
+and `limit` alone changes nothing.
+
+**Why:** a large final message can dominate a client's context before anyone
+decides it is worth reading. The preview keeps that bounded, and `confirm: true`
+is the explicit second call that returns the full text or a page. Ignoring
+`offset`/`limit` without confirmation stops paging from becoming a way around
+the gate. `taskferry_result` still returns the full `message`, so the gate is
+about the dedicated read path, not a security boundary.
+
+**Becomes a bug if:** the preview is empty for a non-empty message, or
+`confirm: true` still truncates without reporting `truncated` and `nextOffset`.
+
+## `taskferry_worktree` refuses a symlink that points outside the task
+
+**Observe:** a symlink inside the dispatch directory that points at a file
+elsewhere is listed as `symlink` but reading it fails with "path denied:
+outside the task directory", even though the link itself is inside.
+
+**Why:** the requested path is resolved with `realpathSync` before any read, so
+the containment check sees the target, not the link. The opened descriptor's
+real path is checked again after `open` to close the swap race. A caller that
+needs the target must have it inside the allowed workspace.
+
+**Becomes a bug if:** a file whose real path is genuinely inside the task
+directory is refused because an intermediate symlink was used.
+
+## `taskferry_accept` has no `force` argument
+
+**Observe:** `taskferry_accept` with `force: true` is rejected by the strict
+schema, while the daemon's own `task.accept` method accepts a `force` flag.
+
+**Why:** forcing past a failed check gate is a host-side decision that needs a
+person to inspect the diff. The bridge leaves that out of the remote surface
+on purpose; the daemon remains able to do it locally.
+
+**Becomes a bug if:** a legitimate accept through MCP needs `force` to complete,
+which means a check gate is failing and hiding the real problem.
+
+## A worktree file read stops at 256 KiB by default
+
+**Observe:** `taskferry_worktree` returns `truncated: true` for a file larger
+than 256 KiB even though the tool accepts `maxBytes` up to 1 MiB.
+
+**Why:** the default keeps an accidental large-file read from consuming the
+caller's context. Paging with `offset` and `maxBytes` reads the rest; the 1 MiB
+hard cap bounds a single response.
+
+**Becomes a bug if:** a file smaller than `maxBytes` comes back truncated, or
+the reported `nextOffset` skips bytes.
