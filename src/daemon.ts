@@ -1,8 +1,8 @@
 import net from 'node:net';
 import { randomUUID } from 'node:crypto';
+import { DEFAULT_LIMITS } from './config.ts';
 
 const MAX_BYTES = 1024 * 1024;
-const TIMEOUT_MS = 5000;
 
 export type Json = Record<string, unknown>;
 
@@ -47,11 +47,14 @@ function readReply(line: string, id: string): { result: unknown } | undefined {
 // One request over the daemon's newline-delimited JSON protocol (`{version: 1, id, method,
 // params}` in, `{version: 1, ok, id, result | error}` out). One connection per call.
 export function callDaemon(
-  socketPath: string,
+  target: string | { daemonSocket: string; limits: { daemonTimeoutMs: number } },
   method: string,
   params: Json,
-  timeout = TIMEOUT_MS,
+  timeout = typeof target === 'string'
+    ? DEFAULT_LIMITS.daemonTimeoutMs
+    : target.limits.daemonTimeoutMs,
 ): Promise<unknown> {
+  const socketPath = typeof target === 'string' ? target : target.daemonSocket;
   return new Promise((resolve, reject) => {
     const id = randomUUID(),
       socket = net.createConnection(socketPath);

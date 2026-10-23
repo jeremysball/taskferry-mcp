@@ -1,17 +1,32 @@
-import { realpathSync } from 'node:fs';
+import { realpath } from 'node:fs/promises';
 import path from 'node:path';
 
-// True when `candidate` resolves, symlinks followed, to `root` or something under it. A path
-// that does not exist is outside every root.
-function isUnder(root: string, candidate: string) {
+export async function resolveRoots(roots: readonly string[]): Promise<string[]> {
+  const resolved = await Promise.all(
+    roots.map(async (root) => {
+      try {
+        return await realpath(root);
+      } catch {
+        return undefined;
+      }
+    }),
+  );
+  return resolved.filter((root): root is string => root !== undefined);
+}
+
+export async function inResolvedRoot(roots: readonly string[], dir: string) {
+  let candidate: string;
   try {
-    const r = realpathSync(root),
-      d = realpathSync(candidate);
-    return d === r || d.startsWith(r + path.sep);
+    candidate = await realpath(dir);
   } catch {
     return false;
   }
+  return roots.some((root) => {
+    const prefix = root.endsWith(path.sep) ? root : root + path.sep;
+    return candidate === root || candidate.startsWith(prefix);
+  });
 }
 
-export const inAllowedRoot = (roots: readonly string[], dir: string) =>
-  roots.some((root) => isUnder(root, dir));
+export async function inAllowedRoot(roots: readonly string[], dir: string) {
+  return inResolvedRoot(await resolveRoots(roots), dir);
+}

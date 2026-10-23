@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync } from 'node:fs';
 import {
+  TASK_STATUS,
   type Call,
   call,
   okReply,
@@ -22,7 +23,6 @@ const NEW_TASK_ID = 'new-task';
 const DONE = 'done';
 const RUNNING = 'running';
 const FOREIGN_DIRECTORY = '/private/other-project';
-const TASK_STATUS = 'task.status';
 const TASK_DISPATCH = 'task.dispatch';
 
 type TaskFields = {
@@ -169,7 +169,7 @@ test('resume refuses running, sessionless and disallowed-model tasks', async () 
 
 test('resume rejects caller-supplied workspace, model and session overrides', async () => {
   const daemon = await stubDaemon((req) =>
-    statusReply(req, { directory: daemon.dir, status: DONE }),
+    statusReply(req, { directory: daemon.dir, status: DONE, sessionId: SESSION_ID, model: MODEL }),
   );
   const bridge = await startBridge(daemon.socket, {
     allowDirectories: [daemon.dir],
@@ -184,9 +184,32 @@ test('resume rejects caller-supplied workspace, model and session overrides', as
       });
       assert.equal(rejected.result?.isError, true, JSON.stringify(extra));
     }
+    assert.equal(daemon.calls.length, 0, 'unknown keys must be rejected before reading status');
     assert.deepEqual(
       daemon.calls.filter((c) => c.method === TASK_DISPATCH),
       [],
+    );
+  } finally {
+    await bridge.close();
+    await daemon.close();
+  }
+});
+
+test('resume refuses a missing sessionId with an otherwise valid source', async () => {
+  const daemon = await stubDaemon((req) =>
+    statusReply(req, { directory: daemon.dir, status: DONE, model: MODEL }),
+  );
+  const bridge = await startBridge(daemon.socket, {
+    allowDirectories: [daemon.dir],
+    allowModels: [MODEL],
+  });
+  try {
+    const response = await resume(bridge.url, { taskId: TASK_ID, prompt: PROMPT });
+    assert.equal(response.result?.isError, true);
+    assert.match(response.result?.content?.[0]?.text ?? '', /no resumable session/);
+    assert.deepEqual(
+      daemon.calls.map((req) => req.method),
+      [TASK_STATUS],
     );
   } finally {
     await bridge.close();

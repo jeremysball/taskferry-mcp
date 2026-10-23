@@ -3,7 +3,16 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { chmodSync, mkdirSync, writeFileSync } from 'node:fs';
 import { ConfigError, resolveConfig } from '../src/config.ts';
-import { removeDir, tempDir } from './helpers.ts';
+import {
+  HEALTH,
+  call,
+  removeDir,
+  startBridge,
+  stubDaemon,
+  tempDir,
+  toolCall,
+  okReply,
+} from './helpers.ts';
 
 const CONFIG_FILE = 'config.json';
 const FILE_SECRET = 'file-secret';
@@ -51,6 +60,10 @@ test('precedence is flag over env over config key over default, for every knob',
   withFiles((dir) => {
     const file = path.join(dir, CONFIG_FILE);
     writeJson(file, {
+      daemonTimeoutMs: 101,
+      listTimeoutMs: 102,
+      modelsCacheTtlMs: 103,
+      previewChars: 104,
       daemonSocket: '/from/file.sock',
       allowedDirectories: ['/file-a', '/file-b'],
       allowedModels: ['file-model'],
@@ -58,6 +71,15 @@ test('precedence is flag over env over config key over default, for every knob',
       listenSocket: '/from/file-listen.sock',
     });
     const fromFile = resolve(['--config', file]);
+    assert.deepEqual(
+      [
+        fromFile.daemonTimeoutMs,
+        fromFile.listTimeoutMs,
+        fromFile.modelsCacheTtlMs,
+        fromFile.previewChars,
+      ],
+      [101, 102, 103, 104],
+    );
     assert.equal(fromFile.daemonSocket, '/from/file.sock');
     assert.deepEqual(fromFile.allowDirectories, ['/file-a', '/file-b']);
     assert.deepEqual(fromFile.allowModels, ['file-model']);
@@ -65,6 +87,10 @@ test('precedence is flag over env over config key over default, for every knob',
     assert.deepEqual(fromFile.listen, { kind: 'unix', path: '/from/file-listen.sock' });
 
     const env = {
+      TASKFERRY_MCP_DAEMON_TIMEOUT_MS: '201',
+      TASKFERRY_MCP_LIST_TIMEOUT_MS: '202',
+      TASKFERRY_MCP_MODELS_CACHE_TTL_MS: '203',
+      TASKFERRY_MCP_PREVIEW_CHARS: '204',
       TASKFERRY_SOCKET_PATH: '/from/env.sock',
       TASKFERRY_ALLOWED_DIRECTORIES: '/env-a:/env-b',
       TASKFERRY_ALLOWED_MODELS: 'env-1,env-2',
@@ -72,6 +98,15 @@ test('precedence is flag over env over config key over default, for every knob',
       TASKFERRY_MCP_LISTEN_SOCKET: '/from/env-listen.sock',
     };
     const fromEnv = resolve(['--config', file], env);
+    assert.deepEqual(
+      [
+        fromEnv.daemonTimeoutMs,
+        fromEnv.listTimeoutMs,
+        fromEnv.modelsCacheTtlMs,
+        fromEnv.previewChars,
+      ],
+      [201, 202, 203, 204],
+    );
     assert.equal(fromEnv.daemonSocket, '/from/env.sock');
     assert.deepEqual(fromEnv.allowDirectories, ['/env-a', '/env-b']);
     assert.deepEqual(fromEnv.allowModels, ['env-1', 'env-2']);
@@ -82,6 +117,14 @@ test('precedence is flag over env over config key over default, for every knob',
       [
         '--config',
         file,
+        '--daemon-timeout-ms',
+        '301',
+        '--list-timeout-ms',
+        '302',
+        '--models-cache-ttl-ms',
+        '303',
+        '--preview-chars',
+        '304',
         '--daemon-socket',
         '/from/flag.sock',
         '--allowed-directories',
@@ -96,6 +139,15 @@ test('precedence is flag over env over config key over default, for every knob',
       env,
     );
     assert.equal(fromFlag.daemonSocket, '/from/flag.sock');
+    assert.deepEqual(
+      [
+        fromFlag.daemonTimeoutMs,
+        fromFlag.listTimeoutMs,
+        fromFlag.modelsCacheTtlMs,
+        fromFlag.previewChars,
+      ],
+      [301, 302, 303, 304],
+    );
     assert.deepEqual(fromFlag.allowDirectories, ['/flag-a']);
     assert.deepEqual(fromFlag.allowModels, ['flag-1']);
     assert.deepEqual(fromFlag.allowRoBinds, ['/flag-bind']);
@@ -214,4 +266,49 @@ test('bad values fail loudly instead of falling back to a default', () => {
   assert.throws(() => resolve(['--no-such-flag']), ConfigError);
   assert.throws(() => resolve(['stray']), ConfigError);
   assert.throws(() => resolve([], { XDG_RUNTIME_DIR: '' }), /daemon socket/);
+});
+
+test('environment tokens are trimmed before bearer authentication', async () => {
+  const config = resolve([], { TASKFERRY_MCP_TOKEN: ' secret ' });
+  assert.equal(config.token, 'secret');
+  const daemon = await stubDaemon((req) => okReply(req, { healthy: true }));
+  const bridge = await startBridge(daemon.socket, { token: config.token });
+  try {
+    const response = await call(bridge.url, toolCall(HEALTH), { token: 'secret' });
+    assert.deepEqual(JSON.parse(response.result?.content?.[0]?.text ?? '{}'), { healthy: true });
+  } finally {
+    await bridge.close();
+    await daemon.close();
+  }
+});
+
+test('computed socket defaults require absolute runtime paths', () => {
+  assert.throws(() => resolve([], { XDG_RUNTIME_DIR: 'relative' }), /absolute path/);
+  assert.throws(() => resolve([], { TASKFERRY_RUNTIME_DIR: 'relative' }), /absolute path/);
+  assert.throws(
+    () => resolve(['--daemon-socket', '/daemon.sock'], { XDG_RUNTIME_DIR: 'relative' }),
+    /absolute path/,
+  );
+  assert.equal(
+    resolve([], { XDG_RUNTIME_DIR: '/run/absolute' }).daemonSocket,
+    '/run/absolute/taskferry/daemon.sock',
+  );
+});
+
+test('limit defaults and invalid positive integers', () => {
+  const config = resolve();
+  assert.deepEqual(
+    [config.daemonTimeoutMs, config.listTimeoutMs, config.modelsCacheTtlMs, config.previewChars],
+    [5000, 15000, 60000, 500],
+  );
+  for (const flag of [
+    '--daemon-timeout-ms',
+    '--list-timeout-ms',
+    '--models-cache-ttl-ms',
+    '--preview-chars',
+  ]) {
+    for (const value of ['0', '-1', '1.5', 'no', '9007199254740992']) {
+      assert.throws(() => resolve([flag, value]), ConfigError);
+    }
+  }
 });

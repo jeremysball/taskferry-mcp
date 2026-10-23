@@ -2,7 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import net from 'node:net';
+import fs from 'node:fs';
+import fsPromises from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import {
+  TASK_STATUS,
   type Call,
   call,
   okReply,
@@ -13,7 +18,6 @@ import {
   toolCall,
 } from './helpers.ts';
 
-const TASK_STATUS = 'task.status';
 const TASK_ID = 'mine';
 const FOREIGN_ID = 'foreign';
 const WORKTREE_TOOL = 'taskferry_worktree';
@@ -228,3 +232,220 @@ test('message previews without confirmation, then returns the whole field page b
     await daemon.close();
   }
 });
+
+for (const character of ['é', '€']) {
+  for (const offset of [0, 262144]) {
+    test(`worktree aligns UTF-8 pages containing ${character} at ${offset}`, async () => {
+      let root = '';
+      const daemon = await stubDaemon((req) => statusFor(req, root));
+      root = daemon.dir;
+      writeFileSync(path.join(root, 'unicode.txt'), 'a'.repeat(262143) + character + 'tail');
+      const bridge = await startBridge(daemon.socket, { allowDirectories: [root] });
+      try {
+        const response = await call(
+          bridge.url,
+          toolCall(WORKTREE_TOOL, { taskId: TASK_ID, path: 'unicode.txt', offset }),
+        );
+        const body = JSON.parse(response.result?.content?.[0]?.text ?? '{}');
+        assert.equal(body.binary, false, `offset ${offset}`);
+        assert.doesNotMatch(body.content, /�/);
+        assert.equal(Buffer.byteLength(body.content), body.bytesRead);
+        assert.ok(body.offset + body.bytesRead > offset, 'paging must advance');
+      } finally {
+        await bridge.close();
+        await daemon.close();
+      }
+    });
+  }
+}
+
+test('UTF-8 paging advances even when the byte budget is smaller than a character', async () => {
+  let root = '';
+  const daemon = await stubDaemon((req) => statusFor(req, root));
+  root = daemon.dir;
+  const text = 'é€😀tail';
+  writeFileSync(path.join(root, 'tiny.txt'), text);
+  const bridge = await startBridge(daemon.socket, { allowDirectories: [root] });
+  try {
+    let offset = 0;
+    let content = '';
+    while (offset < Buffer.byteLength(text)) {
+      const response = await call(
+        bridge.url,
+        toolCall(WORKTREE_TOOL, { offset, taskId: TASK_ID, path: 'tiny.txt', maxBytes: 1 }),
+      );
+      const body = JSON.parse(response.result?.content?.[0]?.text ?? '{}');
+      assert.equal(body.binary, false);
+      assert.ok(body.bytesRead > 0);
+      assert.ok(body.bytesRead <= 4);
+      content += body.content;
+      offset = body.offset + body.bytesRead;
+    }
+    assert.equal(content, text);
+  } finally {
+    await bridge.close();
+    await daemon.close();
+  }
+});
+
+test('worktree directory paging options explain that they apply only to files', async () => {
+  let root = '';
+  const daemon = await stubDaemon((req) => statusFor(req, root));
+  root = daemon.dir;
+  const bridge = await startBridge(daemon.socket, { allowDirectories: [root] });
+  try {
+    for (const options of [{ offset: 0 }, { maxBytes: 1 }]) {
+      const response = await call(
+        bridge.url,
+        toolCall(WORKTREE_TOOL, { taskId: TASK_ID, ...options }),
+      );
+      const body = JSON.parse(response.result?.content?.[0]?.text ?? '{}');
+      assert.match(body.note, /file reads only/);
+    }
+  } finally {
+    await bridge.close();
+    await daemon.close();
+  }
+});
+
+for (const field of ['status', 'preview']) {
+  test(`message uses configured preview and guarded status: ${field}`, async () => {
+    let root = '';
+    const daemon = await stubDaemon((req) =>
+      req.method === TASK_STATUS
+        ? statusFor(req, root)
+        : okReply(req, { status: 'running', message: 'abcdef' }),
+    );
+    root = daemon.dir;
+    const bridge = await startBridge(daemon.socket, { allowDirectories: [root], previewChars: 3 });
+    try {
+      const response = await call(bridge.url, toolCall(MESSAGE_TOOL, { taskId: TASK_ID }));
+      const body = JSON.parse(response.result?.content?.[0]?.text ?? '{}');
+      assert.equal(body[field], field === 'status' ? 'done' : 'abc');
+    } finally {
+      await bridge.close();
+      await daemon.close();
+    }
+  });
+}
+
+test('accept and reject use six times the configured daemon timeout', async (t) => {
+  const timeouts: number[] = [];
+  const original = net.Socket.prototype.setTimeout;
+  t.mock.method(
+    net.Socket.prototype,
+    'setTimeout',
+    function (this: net.Socket, timeout: number, callback?: () => void) {
+      if (this.connecting) timeouts.push(timeout);
+      return original.call(this, timeout, callback);
+    },
+  );
+  let root = '';
+  const daemon = await stubDaemon((req) => statusFor(req, root));
+  root = daemon.dir;
+  const bridge = await startBridge(daemon.socket, {
+    allowDirectories: [root],
+    daemonTimeoutMs: 1000,
+  });
+  try {
+    for (const name of ['taskferry_accept', 'taskferry_reject']) {
+      const response = await call(bridge.url, toolCall(name, { taskId: TASK_ID }));
+      assert.notEqual(response.result?.isError, true);
+    }
+    assert.equal(timeouts.filter((timeout) => timeout === 6000).length, 2);
+    assert.equal(timeouts.filter((timeout) => timeout === 1000).length, 2);
+  } finally {
+    await bridge.close();
+    await daemon.close();
+  }
+});
+
+for (const denyDev of [false, true]) {
+  test(`worktree descriptor resolution with dev fd denied: ${denyDev}`, async (t) => {
+    let root = '';
+    const daemon = await stubDaemon((req) => statusFor(req, root));
+    root = daemon.dir;
+    writeFileSync(path.join(root, 'file.txt'), 'hello');
+    const bridge = await startBridge(daemon.socket, { allowDirectories: [root] });
+    const attempts: string[] = [];
+    const originalSync = fs.realpathSync;
+    const originalAsync = fsPromises.realpath;
+    const check = (value: unknown) => {
+      const name = String(value);
+      if (name.startsWith('/proc/self/fd/') || name.startsWith('/dev/fd/')) {
+        attempts.push(name);
+        if (name.startsWith('/proc/') || denyDev) throw new Error('descriptor path unavailable');
+      }
+    };
+    t.mock.method(fs, 'realpathSync', (value: fs.PathLike) => {
+      check(value);
+      return originalSync(value);
+    });
+    t.mock.method(fsPromises, 'realpath', async (value: fs.PathLike) => {
+      check(value);
+      return originalAsync(value);
+    });
+    syncBuiltinESMExports();
+    try {
+      const args = { taskId: TASK_ID, path: 'file.txt' };
+      const response = await call(bridge.url, toolCall(WORKTREE_TOOL, args));
+      if (denyDev) {
+        assert.equal(response.result?.isError, true);
+        assert.match(response.result?.content?.[0]?.text ?? '', /path unavailable/);
+      } else {
+        assert.notEqual(response.result?.isError, true);
+        assert.ok(attempts.some((name) => name.startsWith('/dev/fd/')));
+      }
+    } finally {
+      t.mock.restoreAll();
+      syncBuiltinESMExports();
+      await bridge.close();
+      await daemon.close();
+    }
+  });
+}
+
+for (const setting of ['timeout', 'cache TTL']) {
+  test(`model listing uses the configured ${setting}`, async (t) => {
+    const dir = tempDir('tf-model-command-');
+    const command = path.join(dir, 'opencode');
+    const oldPath = process.env.PATH;
+    let now = Date.now() + (setting === 'cache TTL' ? 120000 : 0);
+    t.mock.method(Date, 'now', () => now);
+    process.env.PATH = `${dir}:${oldPath}`;
+    writeFileSync(command, '#!/bin/sh\nprintf "one/model\\n"\n', { mode: 0o700 });
+    const daemon = await stubDaemon((req) => okReply(req, {}));
+    const bridge = await startBridge(daemon.socket, { modelsCacheTtlMs: 10, listTimeoutMs: 100 });
+    const models = () => call(bridge.url, toolCall('taskferry_models', { query: 'model' }));
+    try {
+      const first = await models();
+      assert.equal(JSON.parse(first.result?.content?.[0]?.text ?? '{}').models[0].id, 'one/model');
+      if (setting === 'cache TTL') {
+        writeFileSync(command, '#!/bin/sh\nprintf "two/model\\n"\n');
+        const cached = await models();
+        assert.equal(
+          JSON.parse(cached.result?.content?.[0]?.text ?? '{}').models[0].id,
+          'one/model',
+        );
+        now += 11;
+        const expired = await models();
+        assert.equal(
+          JSON.parse(expired.result?.content?.[0]?.text ?? '{}').models[0].id,
+          'two/model',
+        );
+      } else {
+        writeFileSync(command, '#!/bin/sh\nexec sleep 2\n');
+        now += 60001;
+        const timedOut = await models();
+        assert.equal(timedOut.result?.isError, true);
+        assert.match(timedOut.result?.content?.[0]?.text ?? '', /model catalog unavailable/);
+      }
+    } finally {
+      if (oldPath === undefined) delete process.env.PATH;
+      else process.env.PATH = oldPath;
+      await bridge.close();
+      await daemon.close();
+      removeDir(dir);
+    }
+  });
+}

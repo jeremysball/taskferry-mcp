@@ -1,15 +1,32 @@
-import { realpathSync } from 'node:fs';
+import { realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { z } from 'zod';
 import { DaemonError, callDaemon, type Json } from './daemon.ts';
-import { inAllowedRoot } from './scope.ts';
+import { inAllowedRoot, inResolvedRoot, resolveRoots } from './scope.ts';
+import { DEFAULT_LIMITS, type BridgeConfig, type BridgeLimits } from './config.ts';
 
 export type ToolScope = {
   daemonSocket: string;
   allowDirectories: readonly string[];
   allowModels: readonly string[];
   allowRoBinds: readonly string[];
+  limits: BridgeLimits;
 };
+
+export function buildToolScope(config: BridgeConfig): ToolScope {
+  return {
+    daemonSocket: config.daemonSocket,
+    allowDirectories: config.allowDirectories,
+    allowModels: config.allowModels,
+    allowRoBinds: config.allowRoBinds,
+    limits: {
+      daemonTimeoutMs: config.daemonTimeoutMs ?? DEFAULT_LIMITS.daemonTimeoutMs,
+      listTimeoutMs: config.listTimeoutMs ?? DEFAULT_LIMITS.listTimeoutMs,
+      modelsCacheTtlMs: config.modelsCacheTtlMs ?? DEFAULT_LIMITS.modelsCacheTtlMs,
+      previewChars: config.previewChars ?? DEFAULT_LIMITS.previewChars,
+    },
+  };
+}
 
 export type ToolDeps = {
   listModels: () => Promise<string[]>;
@@ -45,7 +62,7 @@ export async function inScopeStatus(taskId: string, scope: ToolScope) {
   if (!scope.allowDirectories.length) throw new Error(ALLOWLIST_REQUIRED);
   let current: unknown;
   try {
-    current = await callDaemon(scope.daemonSocket, TASK_STATUS, { taskId });
+    current = await callDaemon(scope, TASK_STATUS, { taskId });
   } catch (e) {
     // The daemon's own "unknown task id" would tell a caller which IDs exist.
     if (e instanceof DaemonError && e.code === UNKNOWN_TASK)
@@ -53,7 +70,7 @@ export async function inScopeStatus(taskId: string, scope: ToolScope) {
     throw e;
   }
   const directory = (current as Json | null)?.directory;
-  if (typeof directory !== 'string' || !inAllowedRoot(scope.allowDirectories, directory)) {
+  if (typeof directory !== 'string' || !(await inAllowedRoot(scope.allowDirectories, directory))) {
     throw new Error(NOT_ACCESSIBLE);
   }
   return current;
@@ -74,7 +91,7 @@ export function assertAllowedModel(model: string, scope: ToolScope) {
 
 // Resolve each requested read-only bind against the bridge allowlist. Resolving symlinks before
 // the check keeps a link from smuggling in a target the allowlist never named.
-export function resolveRoBinds(requested: readonly string[] | undefined, scope: ToolScope) {
+export async function resolveRoBinds(requested: readonly string[] | undefined, scope: ToolScope) {
   if (requested === undefined || requested.length === 0) return [];
   if (!scope.allowRoBinds.length) {
     throw new Error('read-only bind disabled until allowlist configured');
@@ -84,12 +101,59 @@ export function resolveRoBinds(requested: readonly string[] | undefined, scope: 
     if (!path.isAbsolute(requestedPath)) throw new Error('bind path must be absolute');
     let real: string;
     try {
-      real = realpathSync(requestedPath);
+      real = await realpath(requestedPath);
     } catch {
       throw new Error('bind path unavailable');
     }
-    if (!inAllowedRoot(scope.allowRoBinds, real)) throw new Error('read-only bind denied');
+    if (!(await inAllowedRoot(scope.allowRoBinds, real))) throw new Error('read-only bind denied');
     resolved.add(real);
   }
   return [...resolved];
+}
+
+export async function assertAllowedDirectory(
+  dir: string,
+  scope: ToolScope,
+  roots?: readonly string[],
+) {
+  if (!scope.allowDirectories.length) throw new Error(ALLOWLIST_REQUIRED);
+  let real: string;
+  try {
+    real = await realpath(dir);
+  } catch (error) {
+    throw new Error(`workspace unavailable: ${dir}`, { cause: error });
+  }
+  if (!(await inResolvedRoot(roots ?? (await resolveRoots(scope.allowDirectories)), real))) {
+    throw new Error(
+      `workspace denied: ${real} is outside allowed roots (${scope.allowDirectories.join(', ')})`,
+    );
+  }
+  return real;
+}
+
+export async function readTaskResult(
+  taskId: string,
+  fields: readonly string[] | undefined,
+  scope: ToolScope,
+  options: { full?: boolean } = {},
+) {
+  const current = (await inScopeStatus(taskId, scope)) as Json;
+  const result = await callDaemon(scope, 'task.result', {
+    taskId,
+    ...(fields === undefined ? {} : { fields }),
+    ...(options.full === undefined ? {} : { full: options.full }),
+  });
+  return { status: current.status, result };
+}
+
+export async function buildDispatchRequest(
+  args: { prompt: string; variant?: string; roBind?: readonly string[] },
+  scope: ToolScope,
+) {
+  const readOnlyBinds = await resolveRoBinds(args.roBind, scope);
+  return {
+    prompt: args.prompt,
+    ...(args.variant === undefined ? {} : { variant: args.variant }),
+    ...(readOnlyBinds.length ? { roBind: readOnlyBinds } : {}),
+  };
 }
