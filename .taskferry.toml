@@ -1,0 +1,2 @@
+# taskferry project config: verification gate for changesets
+check = "mise run check"

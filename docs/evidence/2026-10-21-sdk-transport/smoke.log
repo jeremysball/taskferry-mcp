@@ -1,0 +1,2 @@
+smoke ok: {"content":[{"type":"text","text":"{\"healthy\":true}"}]}
+shutdown removed the socket

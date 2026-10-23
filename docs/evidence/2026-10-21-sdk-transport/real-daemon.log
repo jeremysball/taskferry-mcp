@@ -1,0 +1,29 @@
+# Real daemon check, 2026-10-21
+
+Daemon: pid 5599, protocol version 1, socket /run/user/1000/taskferry/daemon.sock
+Bridge: node src/server.ts, loopback TCP, official @modelcontextprotocol/client
+Harness: one-off scripts in the worktree, not committed because they hard-code this machine's paths.
+
+## Read-only pass
+
+tools: taskferry_dispatch, taskferry_health, taskferry_list, taskferry_result, taskferry_status
+health: {"healthy":true,"pid":5599,"version":1}
+list: 6 tasks for /workspace/taskferry
+status: oc_mvfve9au_1528eec7 done /workspace/taskferry
+result: oc_mvfve9au_1528eec7 done "LIVE_KILO_OK"
+out of scope: task not accessible
+unknown id: task not accessible
+dispatch denied: directory or model denied
+daemon task count unchanged: 6
+
+## Dispatch pass
+
+dispatched: oc_mvi1xlws_1804d533
+wait: taskferry wait oc_mvi1xlws_1804d533 -> done, exitCode 0, endedAt 2026-10-21T11:57:42.291Z
+status: oc_mvi1xlws_1804d533 done /workspace/taskferry
+message: "MCP_REAL_DISPATCH_OK"
+
+The dispatch created the task immediately. Completion waited behind nine unrelated
+running tasks in /workspace/salesforce-playground, so queue latency, not the bridge,
+delayed the terminal state. A second bridge pass read status and result after the task
+settled.

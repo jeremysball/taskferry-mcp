@@ -1,32 +1,88 @@
-# TaskFerry MCP Bridge (reconstructed prototype)
+# TaskFerry MCP Bridge
 
-**Status:** Mock-tested prototype; NOT live-tested with TaskFerry or ChatGPT Sites, not production-ready. The earlier missing adapter was not recovered. This is independently reconstructed from the public TaskFerry protocol and saved design plan.
+**Status:** working prototype, validated against a local TaskFerry daemon. The suite runs against a stub daemon and real loopback listeners; a live pass covered the task tools, including one real dispatch and its result. It is not production-ready and has not been run behind a real Sites client.
 
 ## Architecture
 
-Sites MCP client -> Sites-compatible forwarding service (deployment adapter still required) -> authenticated HTTP `/mcp` -> local adapter -> TaskFerry private Unix-domain socket.
+Sites MCP client -> Sites-compatible forwarding service (the deployment adapter is still unwritten) -> authenticated `POST /mcp` -> this bridge -> TaskFerry's private Unix-domain socket.
 
-Written in TypeScript targeting Node.js 22.16+ native type stripping. No third-party packages required for the prototype.
+The bridge is TypeScript run directly by Node's native type stripping, so there is no build step. Node is pinned to 26.5.1 in `.mise.toml`. The MCP side uses the official SDK: each request gets a fresh stateless `McpServer` connected to a `NodeStreamableHTTPServerTransport` that answers with JSON. There are no sessions and no SSE stream.
+
+## Tools
+
+Thirteen tools. Eleven are hard-wired to one daemon method; `taskferry_models`
+runs the local `opencode models` command, and `taskferry_worktree` reads the
+task's dispatch directory locally. A caller cannot name a daemon method
+directly.
+
+| Tool                 | Source            | Notes                                                       |
+| -------------------- | ----------------- | ----------------------------------------------------------- |
+| `taskferry_health`   | `system.health`   |                                                             |
+| `taskferry_list`     | `task.list`       | All allowed workspaces by default; optional directory       |
+| `taskferry_models`   | `opencode models` | Allowed ids, missing allowlist entries, optional query      |
+| `taskferry_status`   | `task.status`     | Scope-guarded; full lifecycle fields                        |
+| `taskferry_result`   | `task.result`     | Scope-guarded; optional `fields` and `full`                 |
+| `taskferry_message`  | `task.result`     | Scope-guarded; final message, preview until `confirm: true` |
+| `taskferry_summary`  | `task.summary`    | Scope-guarded; queues a summary task                        |
+| `taskferry_dispatch` | `task.dispatch`   | Needs both allowlists; optional `variant` and `roBind`      |
+| `taskferry_resume`   | `task.dispatch`   | Continues a settled task's session; derives workspace/model |
+| `taskferry_accept`   | `task.accept`     | Scope-guarded; applies a pending changeset                  |
+| `taskferry_reject`   | `task.reject`     | Scope-guarded; refuses and discards a pending changeset     |
+| `taskferry_cancel`   | `task.cancel`     | Scope-guarded; optional `graceMs`                           |
+| `taskferry_worktree` | local filesystem  | Read-only view inside the task dispatch directory           |
 
 ## Run tests
 
-`npm test`
+`mise run check` runs the full gate: format check, lint, the TypeScript split check, `tsc --noEmit`, and 52 unit tests. CI runs the same steps. `npm test` runs only the tests.
 
-Tests use a real mock Unix socket daemon, and real HTTP listeners, both on the loopback interface. A mutation probe replaces `task.list` forwarding with `system.health`; the first test fails, proving the test inspects the request received by the fake daemon.
+The tests start a real stub daemon on a Unix socket and real HTTP listeners on loopback. Two mutation probes are kept in the evidence directory: disabling the scope guard fails the cross-workspace test, and loosening the socket mode fails the permissions test.
 
-## Run adapter (localhost only)
+## Run the bridge
+
+By default the bridge listens on a Unix socket at `$XDG_RUNTIME_DIR/taskferry-mcp/mcp.sock`, created with mode 0600 inside a 0700 directory. The daemon socket defaults to `$TASKFERRY_RUNTIME_DIR/daemon.sock`, falling back to `$XDG_RUNTIME_DIR/taskferry/daemon.sock`.
 
 ```
 export TASKFERRY_MCP_TOKEN='replace-with-random-secret'
-export TASKFERRY_SOCKET_PATH='/run/user/1000/taskferry/daemon.sock'
-export TASKFERRY_ALLOWED_DIRECTORIES='/home/me/myrepo'
+export TASKFERRY_RUNTIME_DIR='/run/user/1000/taskferry'
+export TASKFERRY_ALLOWED_DIRECTORIES='/path/to/repo'
 export TASKFERRY_ALLOWED_MODELS='provider/model'
+export TASKFERRY_ALLOWED_RO_BINDS='/path/to/credential.json'
 npm start
 ```
 
-This adapter doesn't start TaskFerry. Local socket path must be supplied. `taskferry_list` requires a configured directory allowlist; `taskferry_dispatch` additionally requires a model allowlist. Do NOT expose this HTTP listener directly on the public internet. TLS and external reachability need an authenticated proxy.
+Each setting resolves as flag, then environment variable, then config-file key, then default.
 
-## Gateway demonstration (loopback only)
+| Flag                    | Environment                         | Config key           | Default                                   |
+| ----------------------- | ----------------------------------- | -------------------- | ----------------------------------------- |
+| `--daemon-socket`       | `TASKFERRY_SOCKET_PATH`             | `daemonSocket`       | `$TASKFERRY_RUNTIME_DIR/daemon.sock`      |
+| `--allowed-directories` | `TASKFERRY_ALLOWED_DIRECTORIES`     | `allowedDirectories` | none                                      |
+| `--allowed-models`      | `TASKFERRY_ALLOWED_MODELS`          | `allowedModels`      | none                                      |
+| `--allowed-ro-binds`    | `TASKFERRY_ALLOWED_RO_BINDS`        | `allowedRoBinds`     | none                                      |
+| `--listen-socket`       | `TASKFERRY_MCP_LISTEN_SOCKET`       | `listenSocket`       | `$XDG_RUNTIME_DIR/taskferry-mcp/mcp.sock` |
+| `--listen-port`         | `TASKFERRY_MCP_LISTEN_PORT`         | `listenPort`         | none                                      |
+| `--token-file`          | `TASKFERRY_MCP_TOKEN_FILE`          | `tokenFile`          | none                                      |
+| `--daemon-timeout-ms`   | `TASKFERRY_MCP_DAEMON_TIMEOUT_MS`   | `daemonTimeoutMs`    | `5000`                                    |
+| `--list-timeout-ms`     | `TASKFERRY_MCP_LIST_TIMEOUT_MS`     | `listTimeoutMs`      | `15000`                                   |
+| `--models-cache-ttl-ms` | `TASKFERRY_MCP_MODELS_CACHE_TTL_MS` | `modelsCacheTtlMs`   | `60000`                                   |
+| `--preview-chars`       | `TASKFERRY_MCP_PREVIEW_CHARS`       | `previewChars`       | `500`                                     |
+
+`--config` and `TASKFERRY_MCP_CONFIG` name a config file; the default is `$XDG_CONFIG_HOME/taskferry-mcp/config.json`. Directory lists split on `:`, model lists on `,`, and read-only bind lists on `:`.
+
+The timeout and preview knobs bound a slow call and a large response. `daemonTimeoutMs` is the per-call daemon socket timeout; `listTimeoutMs` bounds the `opencode models` catalog command; `modelsCacheTtlMs` is how long that catalog is cached; `previewChars` is the unconfirmed `taskferry_message` preview length.
+
+The bearer token comes from `TASKFERRY_MCP_TOKEN` or a token file, never both. A token file must not be readable by group or others, and the bridge refuses an empty one. The token is not a flag or a config key, because both leak through `ps`, backups, and diffs.
+
+Both surfaces require the exact `Bearer <token>` authorization form: a bare token or any other scheme is refused with 401 at the HTTP layer. The gateway applies the same loopback `Host`/`Origin` checks as the bridge's TCP mode, and both answer every request, refusals included, with `Cache-Control: no-store`.
+
+For a client that only speaks HTTP, use a loopback TCP port:
+
+```
+node src/server.ts --listen-port 8787
+```
+
+TCP mode binds `127.0.0.1` and refuses any request whose `Host` or `Origin` is not loopback, even with a valid token. Do not expose this listener directly. TLS and external reachability belong to an authenticated proxy.
+
+## Gateway demonstration
 
 ```
 export TASKFERRY_UPSTREAM_URL='http://127.0.0.1:8787/mcp'
@@ -35,24 +91,87 @@ export TASKFERRY_MCP_TOKEN='replace-with-random-secret'
 npm run gateway
 ```
 
-Gateway is a generic Node.js forwarding *reference implementation*, not deployed or validated in ChatGPT Sites. It forwards one configured `/mcp` endpoint only, with isolated gateway and upstream credentials. This is not proof that Sites supports this code/runtime.
+`gateway.ts` forwards one configured `/mcp` endpoint with separate inbound and upstream tokens, and listens on port 8788 by default. Like the bridge's TCP mode, it binds `127.0.0.1` only; reaching it from elsewhere is the job of an authenticated proxy. It is a reference implementation. Sites support for this runtime is unverified.
+
+## Scope guard
+
+`taskferry_status`, `taskferry_result` and `taskferry_summary` read `task.status` and check the canonical `directory` against the allowed roots before they return status, request result content or queue a summary. A missing or unresolvable directory fails closed. The root check is `inAllowedRoot` in `src/scope.ts`; the scoped status read is `inScopeStatus` in `src/tools-shared.ts`.
+
+`taskferry_list` without a directory asks the daemon for its newest 500 tasks and filters the rows through the same allowed roots. Passing a directory scopes the list to that workspace, which must itself be under an allowed root.
+
+An unknown task ID and an out-of-scope one both answer "task not accessible", which keeps a caller from probing IDs outside its roots. A live pass confirmed that mapping against the running daemon.
+
+`taskferry_result` accepts `fields` to select result fields and `full` to return the complete narration. `taskferry_summary` wraps `task.summary`: it returns a queued summary task in `summaryTask`, and the caller polls `taskferry_status` and reads `taskferry_result` against that id. `mode: "activity"` reads cached activity without spawning a worker; `mode: "report"` (the default) queues a summarizer.
+
+`taskferry_models` shells out to `opencode models` and caches the result for 60 seconds (`modelsCacheTtlMs`). Without a query it returns the allowlisted model ids only. With a query it searches the full installed catalog and marks each match as allowed or not. `missingAllowedModels` names allowlisted ids that are not installed, which catches an allowlist typo before a dispatch fails.
+
+`taskferry_dispatch` accepts an optional `variant` string for the model reasoning level, for example `low`, `high`, `xhigh`, `max`, or `highest`; it forwards the value to the daemon as `variant` and omits it when unset. A denied request says whether the workspace or the model failed and includes the allowed models.
+
+`taskferry_dispatch` also accepts an optional `roBind` array of absolute host paths. Each path is resolved with `realpathSync` and must be on the read-only bind allowlist, either as the exact file or under an allowed directory. The bridge forwards the resolved paths to the daemon as `roBind`, which mounts each one read-only at the same path inside the task sandbox. There is no read-write bind surface.
+
+## Resume
+
+`taskferry_resume` takes a settled task id and a follow-up prompt, then queues a
+new task in that task's existing session. The workspace, model and session id
+come from the source task, not from the caller, so a resume cannot move a
+session into a workspace or model the bridge would not have allowed directly.
+The source task must have a session and must not be queued or running. Accepts
+the same optional `variant` and `roBind` arguments as dispatch.
+
+## Changesets
+
+`taskferry_accept` applies a task's pending changeset to its workspace.
+`taskferry_reject` refuses the same changeset and discards its overlay without
+touching the workspace. Both run the `task.status` scope check first, so a task
+outside the allowed roots is refused before the write. Accept deliberately has
+no `force` argument: a blocking check gate has to be fixed forward on the host,
+where a person can inspect the diff.
+
+`taskferry_cancel` removes a queued task before launch, or sends SIGTERM to a
+running task and escalates to SIGKILL after `graceMs` (the daemon default when
+omitted). Cancelling a settled task is a no-op with an explanatory note.
+
+## Read-only worktree view
+
+`taskferry_worktree` takes a task id and an optional relative `path`. With no
+path it lists the dispatch directory; a directory path lists that directory; a
+file path returns its text. Every path is resolved with `realpathSync` and must
+stay inside the task directory, so `..`, absolute paths, and symlinks pointing
+outside are refused. A file read returns at most 256 KiB by default; pass
+`offset` and `maxBytes` to page by byte offset. The response reports `offset`,
+`bytesRead`, and `truncated`, so the next page starts at `offset + bytesRead`.
+Bytes that are not UTF-8 text come back with `binary: true` and no content.
+Directory listings are capped at 500 rows and are not paged, so a byte offset
+has no meaning there.
+
+## Full final message
+
+`taskferry_message` reads only the final `message` field, without the daemon's
+2000-character narration preview cap. The first call without `confirm: true`
+returns `messageChars` and a 500-character preview, which keeps a large message
+out of the client's context until the caller explicitly asks for it. With
+`confirm: true` it returns the whole message, or a page when `offset` and
+`limit` are set (both counted in characters). `nextOffset` names the next
+character offset when more remains. A
+non-confirmed call ignores `offset` and `limit`, so paging cannot be used to
+walk the full message without confirming.
 
 ## Limitations / next gates
 
-- Real TaskFerry read-only daemon integration untested; exact `task.dispatch` parameters may differ, so dispatch must remain disabled until validated.
-- MCP Streamable HTTP compatibility requires client-specific verification (Accept, initialization, session/version negotiation, streaming, notifications, lifecycle). Current server supports basic JSON responses and notification 202 handling; it does not offer SSE streaming or sessions.
-- Task status/result record access not yet scoped to workspace; task IDs could expose another workspace. Enforce authorization on task ID before deployment.
-- Only five tests exist, not complete B01-B18 coverage. No approval snapshot baselines approved by owner; no full typechecker run.
-- Do not automatically retry ambiguous dispatch failures; no durable idempotency guarantee.
-- The `gateway.ts` module is a Node.js prototype. A Sites-native handler and actual deployment require the Sites runtime/API interface.
-- Validate input schemas, HTTP limits, authentication, dispatch restrictions, CSRF/origin posture, auditability, secret rotation, and response truncation before production.
+- Real TaskFerry integration live passes cover health, list, status, result, message, worktree, summary, dispatch, and dispatched-task results. Changeset accept/reject and cancel are unit-tested against the stub only, because a live call would mutate a real workspace. Resume is covered by unit tests and a live pass that recalled a codeword from the source session. Queue behavior under load, concurrent clients, non-default executors, and very long summaries are still untested. Dispatch stays disabled until both allowlists are set, and read-only binds stay disabled until the bind allowlist is set.
+- MCP compatibility is verified against the official SDK client and raw JSON-RPC over HTTP. The bridge answers with JSON only, so a client that requires SSE or sessions will fail.
+- The suite has 52 cases and does not cover the B01-B18 matrix from the design plan, which is not in this repo.
+- Dispatch has no durable idempotency. Do not retry an ambiguous failure automatically.
+- `gateway.ts` is a Node.js prototype. A Sites-native handler and a real deployment need the Sites runtime and API.
+- Validate input schemas, HTTP limits, authentication, dispatch restrictions, CSRF and origin posture, audit logging, secret rotation, and response truncation before production.
 
 ## Evidence
 
-- `red.log`: initial module-missing test failure (does NOT count as assertion-based RED).
-- `green.log`: five passing mock tests after fixing fixture allowlist.
-- `mutation.log`: deliberate mutation of daemon method forwarding failed one of five tests, reverted afterward.
+`docs/evidence/` holds verbatim logs from named points in the project's history. `docs/evidence/README.md` records the branch and commit behind each capture, and why their absolute host paths are left as recorded. These are historical captures, not the current suite state; run `mise run check` for today's tree.
 
-## 2026-10-20 scope guard follow-up
-
-Added `taskferry_status`/`taskferry_result` workspace authorization by reading `task.status` and checking that its canonical `directory` is within a configured allowed root before returning status or requesting result content. Missing/unresolvable directory fails closed. New mock test passes with six total tests; deliberately disabling the guard makes that test fail. This does **not** prove the guard against a real TaskFerry daemon or against symlink/path races, and does not make the bridge production ready.
+- `docs/evidence/2026-10-20-prototype-v2/`: the prototype's first test loop.
+  - `red.log`: initial module-missing test failure. It does not count as assertion-based RED.
+  - `green.log`: five passing mock tests after the fixture allowlist was fixed.
+  - `mutation.log`: a change to daemon method forwarding failed one test, then was reverted.
+  - `scope-red.log`, `scope-green.log`, `scope-mutation.log`, `scope-final.log`: the same sequence for the scope guard.
+- `docs/evidence/2026-10-21-sdk-transport/`: the SDK-transport refactor's captures, including the full gate at that commit (`check.log`, 37 cases), two mutation probes (`mutation-scope.log`, `mutation-socket-mode.log`), a CLI smoke run (`smoke.log`), and a live daemon pass (`real-daemon.log`) covering the task tools and one dispatch (`oc_mvi1xlws_1804d533`) that returned `MCP_REAL_DISPATCH_OK`.
