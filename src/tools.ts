@@ -22,6 +22,10 @@ export type { ToolDeps, ToolScope } from './tools-shared.ts';
 
 const LIST_ROW_CAP = 500;
 const MODEL_ROW_CAP = 50;
+const EMPTY_TASK_LIST_SENTINELS = new Set([
+  'none found in this workspace',
+  "none found (this server process's lifetime)",
+]);
 
 const RESULT_FIELDS = [
   'message',
@@ -89,12 +93,24 @@ function countStatuses(rows: readonly Json[]) {
   return counts;
 }
 
+type TaskList = Json & { tasks: Json[] };
+
+function taskListResult(result: unknown): TaskList {
+  if (typeof result === 'object' && result !== null) {
+    const value = result as Json;
+    if (Array.isArray(value.tasks)) return value as TaskList;
+    if (typeof value.tasks === 'string' && EMPTY_TASK_LIST_SENTINELS.has(value.tasks)) {
+      return { ...value, tasks: [] };
+    }
+  }
+  throw new Error('invalid task.list reply: tasks must be an array');
+}
+
 async function visibleList(results: unknown[], roots: readonly string[]) {
   const rows = new Map<unknown, Json>();
   let capped = false;
   for (const result of results) {
-    const tasks = (result as Json | null)?.tasks;
-    if (!Array.isArray(tasks)) throw new Error('invalid task.list reply: tasks must be an array');
+    const { tasks } = taskListResult(result);
     capped ||= tasks.length >= LIST_ROW_CAP;
     for (const row of tasks) {
       if (await isVisibleRow(row, roots)) rows.set((row as Json).id, row as Json);
@@ -124,7 +140,7 @@ async function listTasks(args: { directory?: string }, scope: ToolScope) {
     return visibleList(results, roots);
   }
   const real = await assertAllowedDirectory(args.directory, scope, roots);
-  return callDaemon(scope, 'task.list', { directory: real });
+  return taskListResult(await callDaemon(scope, 'task.list', { directory: real }));
 }
 
 type ModelArgs = { query?: string; limit?: number };
