@@ -1,8 +1,7 @@
 import net from 'node:net';
 import { randomUUID } from 'node:crypto';
 import { DEFAULT_LIMITS } from './config.ts';
-
-const MAX_BYTES = 1024 * 1024;
+import { MAX_REQUEST_BYTES } from './transport.ts';
 
 export type Json = Record<string, unknown>;
 
@@ -89,7 +88,7 @@ export function callDaemon(
     socket.setEncoding('utf8');
     socket.on('data', (chunk: string) => {
       data += chunk;
-      if (Buffer.byteLength(data) > MAX_BYTES) {
+      if (Buffer.byteLength(data) > MAX_REQUEST_BYTES) {
         finish(new Error('daemon response too large'));
         return;
       }

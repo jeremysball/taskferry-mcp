@@ -8,6 +8,7 @@ import { registerMessageTool } from './tools-message.ts';
 import { registerResumeTool } from './tools-resume.ts';
 import { registerTools, type ToolDeps } from './tools.ts';
 import { registerWorktreeTool } from './tools-worktree.ts';
+import { buildToolScope } from './tools-shared.ts';
 import { MAX_REQUEST_BYTES, refuse, transportRefusal } from './transport.ts';
 
 const SERVER_INFO = { name: 'taskferry-mcp', version: '0.1.0' } as const;
@@ -36,7 +37,6 @@ async function serveMcp(
     capabilities: { tools: { listChanged: false } },
     instructions: INSTRUCTIONS,
   });
-  const { buildToolScope } = await import('./tools-shared.ts');
   const scope = buildToolScope(config);
   registerTools(server, scope, deps);
   registerChangesetTools(server, scope);
