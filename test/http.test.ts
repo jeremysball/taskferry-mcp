@@ -1,5 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import http from 'node:http';
+import net from 'node:net';
+import { NodeStreamableHTTPServerTransport } from '@modelcontextprotocol/node';
+import { transportRefusal } from '../src/transport.ts';
 import { HEALTH, fixture, rpc, send, splitInsideChar, toolCall } from './helpers.ts';
 
 test('unauthenticated requests never touch the daemon, an authenticated read succeeds', async () => {
@@ -8,6 +12,7 @@ test('unauthenticated requests never touch the daemon, an authenticated read suc
     for (const token of ['wrong', 'x', 'correct-secret-but-longer', '', null]) {
       const refused = await send(f.url, toolCall(HEALTH), { token });
       assert.equal(refused.status, 401, `token ${JSON.stringify(token)}`);
+      assert.equal(refused.headers['www-authenticate'], 'Bearer');
     }
     assert.equal(f.calls.length, 0);
     const ok = await send(f.url, toolCall(HEALTH));
@@ -65,7 +70,7 @@ test('a multibyte character split across request chunks survives', async () => {
   }
 });
 
-test('on loopback TCP a foreign Host or any browser Origin is refused, even with the token', async () => {
+test('on loopback TCP a foreign Host or Origin is refused, even with the token', async () => {
   const f = await fixture();
   try {
     const url = new URL(f.url);
@@ -75,7 +80,63 @@ test('on loopback TCP a foreign Host or any browser Origin is refused, even with
     assert.equal(browser.status, 403);
     const named = await send(f.url, rpc('ping'), { headers: { host: `localhost:${url.port}` } });
     assert.equal(named.status, 200);
+    for (const host of ['[invalid']) {
+      assert.equal((await send(f.url, rpc('ping'), { headers: { host } })).status, 403);
+    }
+    for (const origin of ['', 'null', 'not a URL']) {
+      assert.equal((await send(f.url, rpc('ping'), { headers: { origin } })).status, 403);
+    }
+    const localOrigin = await send(f.url, rpc('ping'), {
+      headers: {
+        origin: 'http://localhost:3000',
+        'content-type': 'Application/JSON; charset=utf-8',
+      },
+    });
+    assert.equal(localOrigin.status, 200);
     assert.equal(f.calls.length, 0);
+  } finally {
+    await f.close();
+  }
+});
+
+test('the loopback guard refuses a missing or empty Host', () => {
+  const req = new http.IncomingMessage(new net.Socket());
+  req.url = '/mcp';
+  req.method = 'POST';
+  req.headers = { authorization: 'Bearer secret', 'content-type': 'application/json' };
+  assert.equal(transportRefusal(req, { token: 'secret', loopback: true }), 403);
+  req.headers.host = '';
+  assert.equal(transportRefusal(req, { token: 'secret', loopback: true }), 403);
+  req.destroy();
+});
+
+test('JSON content type must match the media type, not a substring', async () => {
+  const f = await fixture();
+  try {
+    const result = await send(f.url, rpc('ping'), {
+      headers: { 'content-type': 'text/application/json' },
+    });
+    assert.equal(result.status, 415);
+  } finally {
+    await f.close();
+  }
+});
+
+test('unexpected transport failures log the error and return a generic 500', async (t) => {
+  const error = new Error('private transport failure');
+  t.mock.method(NodeStreamableHTTPServerTransport.prototype, 'handleRequest', async () => {
+    throw error;
+  });
+  const logged = t.mock.method(console, 'error', (..._args: unknown[]) => {});
+  const f = await fixture();
+  try {
+    const result = await send(f.url, rpc('ping'));
+    assert.equal(result.status, 500);
+    assert.equal(result.text.includes(error.message), false);
+    assert.equal(
+      logged.mock.calls.some((call) => call.arguments.includes(error)),
+      true,
+    );
   } finally {
     await f.close();
   }

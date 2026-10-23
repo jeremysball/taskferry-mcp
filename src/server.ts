@@ -1,5 +1,4 @@
 import http from 'node:http';
-import { timingSafeEqual } from 'node:crypto';
 import { NodeStreamableHTTPServerTransport } from '@modelcontextprotocol/node';
 import { McpServer } from '@modelcontextprotocol/server';
 import { resolveConfig, type BridgeConfig } from './config.ts';
@@ -9,6 +8,7 @@ import { registerMessageTool } from './tools-message.ts';
 import { registerResumeTool } from './tools-resume.ts';
 import { registerTools, type ToolDeps } from './tools.ts';
 import { registerWorktreeTool } from './tools-worktree.ts';
+import { MAX_REQUEST_BYTES, refuse, transportRefusal } from './transport.ts';
 
 const SERVER_INFO = { name: 'taskferry-mcp', version: '0.1.0' } as const;
 const INSTRUCTIONS = `TaskFerry queues background coding tasks on a host daemon. A dispatch returns an id immediately and does not wait for work.
@@ -23,61 +23,6 @@ taskferry_resume continues a settled task's conversation: pass its taskId and a 
 taskferry_dispatch accepts variant to set the model reasoning level; omit it for the TaskFerry default.
 roBind is optional: it exposes host files or directories read-only inside the task sandbox, and each requested path must already be on the bridge read-only bind allowlist. Use it for credentials or shared config, never for broad filesystem access.
 Dispatch has no idempotency key, so do not retry an ambiguous dispatch automatically.`;
-const MAX_REQUEST_BYTES = 1024 * 1024;
-const BEARER = 'Bearer ';
-const LOOPBACK_HOSTNAMES = new Set(['localhost', '127.0.0.1', '[::1]']);
-
-function sameSecret(a: string, b: string) {
-  const x = Buffer.from(a),
-    y = Buffer.from(b);
-  return x.length === y.length && timingSafeEqual(x, y);
-}
-
-function hostnameOf(host: string | undefined) {
-  if (host === undefined) return undefined;
-  try {
-    return new URL(`http://${host}`).hostname;
-  } catch {
-    return undefined;
-  }
-}
-
-// On a loopback TCP listener, a foreign Host header can be a DNS-rebinding attempt, and any
-// browser Origin is a cross-site request. A unix socket has no such exposure: the file mode is
-// the boundary, so these checks are for TCP only.
-function loopbackRequest(req: http.IncomingMessage) {
-  const host = hostnameOf(req.headers.host);
-  if (host === undefined || !LOOPBACK_HOSTNAMES.has(host)) return false;
-  const origin = req.headers.origin;
-  if (origin === undefined) return true;
-  try {
-    return LOOPBACK_HOSTNAMES.has(new URL(origin).hostname);
-  } catch {
-    return false;
-  }
-}
-
-// The status to refuse with before the MCP layer sees the request, if any. The token is checked
-// before anything the caller controls beyond the path, so an unauthenticated request learns
-// nothing about Host or Origin handling.
-function refusal(req: http.IncomingMessage, config: BridgeConfig) {
-  if (req.url !== '/mcp') return 404;
-  const authorization = req.headers.authorization ?? '';
-  if (
-    !authorization.startsWith(BEARER) ||
-    !sameSecret(authorization.slice(BEARER.length), config.token)
-  ) {
-    return 401;
-  }
-  if (req.method !== 'POST') return 405;
-  if (!(req.headers['content-type'] ?? '').includes('application/json')) return 415;
-  if (config.listen.kind === 'tcp' && !loopbackRequest(req)) return 403;
-  return undefined;
-}
-
-function refuse(res: http.ServerResponse, status: number) {
-  res.writeHead(status, status === 405 ? { Allow: 'POST' } : undefined).end();
-}
 
 // One MCP server and transport per request. The transport is stateless (no session ID), and JSON
 // responses keep the bridge a plain request/response endpoint rather than an event stream.
@@ -118,12 +63,16 @@ export function createBridge(config: BridgeConfig, deps: Partial<ToolDeps> = {})
   if (!config.token) throw new Error('bearer token required');
   return http.createServer((req, res) => {
     res.setHeader('Cache-Control', 'no-store');
-    const status = refusal(req, config);
+    const status = transportRefusal(req, {
+      token: config.token,
+      loopback: config.listen.kind === 'tcp',
+    });
     if (status !== undefined) {
       refuse(res, status);
       return;
     }
-    serveMcp(req, res, config, deps).catch(() => {
+    serveMcp(req, res, config, deps).catch((error: unknown) => {
+      console.error('MCP request failed', error);
       if (res.headersSent) res.destroy();
       else res.writeHead(500).end();
     });

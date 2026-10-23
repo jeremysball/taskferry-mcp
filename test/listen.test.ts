@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import net from 'node:net';
+import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import path from 'node:path';
@@ -150,6 +151,70 @@ test('the tcp listener binds loopback only', async () => {
   try {
     assert.equal((server.address() as net.AddressInfo).address, '127.0.0.1');
   } finally {
+    await listener.close();
+  }
+});
+
+test(
+  'unix socket is private at bind time and the process umask is restored',
+  { skip: process.platform === 'win32' },
+  async (t) => {
+    const dir = tempDir(LISTEN_DIR);
+    const socketPath = path.join(dir, 'mcp.sock');
+    const server = http.createServer();
+    const original = server.listen;
+    const masks: number[] = [];
+    t.mock.method(
+      server,
+      'listen',
+      function (this: http.Server, ...args: Parameters<typeof original>) {
+        masks.push(process.umask());
+        return original.apply(this, args);
+      },
+    );
+    const previous = process.umask();
+    try {
+      const listener = await listenBridge(server, { kind: 'unix', path: socketPath });
+      try {
+        assert.equal(process.umask(), previous);
+        assert.equal(statSync(socketPath).mode & 0o777, 0o600);
+        assert.deepEqual(masks, [0o077]);
+      } finally {
+        await listener.close();
+      }
+    } finally {
+      process.umask(previous);
+      removeDir(dir);
+    }
+  },
+);
+
+test('listener closes active connections before closing the server', async (t) => {
+  const server = http.createServer();
+  const listener = await listenBridge(server, { kind: 'tcp', port: 0 });
+  const order: string[] = [];
+  const closeAll = server.closeAllConnections.bind(server);
+  const close = server.close.bind(server);
+  t.mock.method(server, 'closeAllConnections', () => {
+    order.push('connections');
+    closeAll();
+  });
+  t.mock.method(server, 'close', (callback?: (error?: Error) => void) => {
+    order.push('server');
+    return close(callback);
+  });
+  const socket = net.createConnection({
+    host: '127.0.0.1',
+    port: (server.address() as net.AddressInfo).port,
+  });
+  await once(socket, 'connect');
+  socket.write('POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10\r\n\r\nx');
+  try {
+    const closing = listener.close();
+    assert.deepEqual(order, ['connections', 'server']);
+    await closing;
+  } finally {
+    socket.destroy();
     await listener.close();
   }
 });

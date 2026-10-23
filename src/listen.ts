@@ -3,6 +3,7 @@ import path from 'node:path';
 import { chmodSync, existsSync, lstatSync, mkdirSync, unlinkSync } from 'node:fs';
 import type http from 'node:http';
 import type { Listen } from './config.ts';
+import { errorCode } from './errors.ts';
 
 export type Listener = { close: () => Promise<void> };
 
@@ -27,7 +28,7 @@ function socketIsLive(socketPath: string): Promise<boolean> {
     socket.setTimeout(PROBE_TIMEOUT_MS, () => settle(true));
     socket.once('connect', () => settle(true));
     socket.once('error', (e: Error) => {
-      const code = (e as { code?: string }).code;
+      const code = errorCode(e);
       if (code === 'ECONNREFUSED' || code === 'ENOENT') settle(false);
       else settle(false, e);
     });
@@ -65,6 +66,7 @@ function closeServer(server: http.Server) {
       resolve();
       return;
     }
+    server.closeAllConnections();
     server.close(() => resolve());
   });
 }
@@ -94,7 +96,14 @@ export async function listenBridge(server: http.Server, listen: Listen): Promise
     unlinkSync(listen.path);
   }
 
-  await listening(server, () => server.listen(listen.path));
+  await listening(server, () => {
+    const previous = process.umask(0o077);
+    try {
+      server.listen(listen.path);
+    } finally {
+      process.umask(previous);
+    }
+  });
   chmodSync(listen.path, SOCKET_MODE);
 
   return {
