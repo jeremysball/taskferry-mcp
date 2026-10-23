@@ -1,22 +1,20 @@
-import {
-  type Dirent,
-  closeSync,
-  constants,
-  fstatSync,
-  lstatSync,
-  openSync,
-  readSync,
-  readdirSync,
-  realpathSync,
-  statSync,
-} from 'node:fs';
+import { type Dirent, type Stats, constants } from 'node:fs';
+import { open, lstat, readdir, realpath, stat } from 'node:fs/promises';
 import { isUtf8 } from 'node:buffer';
 import path from 'node:path';
 import { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import { type Json } from './daemon.ts';
-import { inAllowedRoot } from './scope.ts';
-import { READ_ONLY, asText, inScopeStatus, nonBlank, type ToolScope } from './tools-shared.ts';
+import { inResolvedRoot } from './scope.ts';
+import { errorCode } from './errors.ts';
+import {
+  READ_ONLY,
+  asText,
+  assertAllowedDirectory,
+  inScopeStatus,
+  nonBlank,
+  type ToolScope,
+} from './tools-shared.ts';
 
 const MAX_ENTRIES = 500;
 const DEFAULT_MAX_BYTES = 256 * 1024;
@@ -38,39 +36,29 @@ const worktreeArgs = z.strictObject({
 type WorktreeArgs = z.infer<typeof worktreeArgs>;
 type EntryType = 'file' | 'directory' | 'symlink' | 'other';
 
-function errorCode(error: unknown): string | undefined {
-  return typeof error === 'object' && error !== null && 'code' in error
-    ? String((error as { code?: unknown }).code)
-    : undefined;
-}
-
 async function resolveTaskRoot(taskId: string, scope: ToolScope) {
   const current = (await inScopeStatus(taskId, scope)) as Json | null;
   const directory = current?.directory;
   if (typeof directory !== 'string') throw new Error('workspace unavailable');
-  try {
-    return realpathSync(directory);
-  } catch (error) {
-    throw new Error('workspace unavailable', { cause: error });
-  }
+  return assertAllowedDirectory(directory, scope);
 }
 
 // Resolve a caller path against the task directory and require the result to
 // stay inside it after symlinks are followed. A path that does not exist is
 // reported as missing; it never falls back to the unresolved string.
-function resolvePath(root: string, requested: string | undefined) {
+async function resolvePath(root: string, requested: string | undefined) {
   const relative = requested ?? '.';
   if (path.isAbsolute(relative) || relative.includes('\0')) {
     throw new Error(DENIED_RELATIVE);
   }
   let target: string;
   try {
-    target = realpathSync(path.resolve(root, relative));
+    target = await realpath(path.resolve(root, relative));
   } catch (error) {
     if (errorCode(error) === 'ENOENT') throw new Error(PATH_NOT_FOUND, { cause: error });
     throw new Error(PATH_UNAVAILABLE, { cause: error });
   }
-  if (!inAllowedRoot([root], target)) throw new Error(DENIED_OUTSIDE);
+  if (!(await inResolvedRoot([root], target))) throw new Error(DENIED_OUTSIDE);
   return { target, relative: path.relative(root, target) || '.' };
 }
 
@@ -81,10 +69,10 @@ function entryType(dirent: Dirent): EntryType {
   return 'other';
 }
 
-function entrySize(fullPath: string, type: EntryType) {
+async function entrySize(fullPath: string, type: EntryType) {
   if (type !== 'file' && type !== 'symlink') return undefined;
   try {
-    return lstatSync(fullPath).size;
+    return (await lstat(fullPath)).size;
   } catch {
     return undefined;
   }
@@ -96,23 +84,25 @@ function compareNames(a: Dirent, b: Dirent) {
   return 0;
 }
 
-function listDirectory(taskId: string, root: string, target: string, relative: string) {
+async function listDirectory(taskId: string, root: string, target: string, relative: string) {
   let dirents: Dirent[];
   try {
-    dirents = readdirSync(target, { withFileTypes: true });
+    dirents = await readdir(target, { withFileTypes: true });
   } catch (error) {
     throw new Error('directory unavailable', { cause: error });
   }
   const total = dirents.length;
-  const entries = dirents
-    .slice()
-    .sort(compareNames)
-    .slice(0, MAX_ENTRIES)
-    .map((dirent) => {
-      const type = entryType(dirent);
-      const size = entrySize(path.join(target, dirent.name), type);
-      return { type, name: dirent.name, ...(size === undefined ? {} : { size }) };
-    });
+  const entries = await Promise.all(
+    dirents
+      .slice()
+      .sort(compareNames)
+      .slice(0, MAX_ENTRIES)
+      .map(async (dirent) => {
+        const type = entryType(dirent);
+        const size = await entrySize(path.join(target, dirent.name), type);
+        return { type, name: dirent.name, ...(size === undefined ? {} : { size }) };
+      }),
+  );
   return {
     entries,
     total,
@@ -124,9 +114,9 @@ function listDirectory(taskId: string, root: string, target: string, relative: s
   };
 }
 
-function openRead(target: string) {
+async function openRead(target: string) {
   try {
-    return openSync(target, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    return await open(target, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   } catch (error) {
     if (errorCode(error) === 'ENOENT') throw new Error(PATH_NOT_FOUND, { cause: error });
     throw new Error(PATH_UNAVAILABLE, { cause: error });
@@ -136,17 +126,55 @@ function openRead(target: string) {
 // The path was resolved before opening, but a worker could still swap a path
 // component between realpath and open. Check the opened descriptor's real path
 // as well, the same fd-based guard TaskFerry's output reader uses.
-function assertFdInside(root: string, fd: number) {
-  let opened: string;
-  try {
-    opened = realpathSync(`/proc/self/fd/${fd}`);
-  } catch {
+async function assertFdInside(root: string, fd: number) {
+  for (const base of ['/proc/self/fd', '/dev/fd']) {
+    let opened: string;
+    try {
+      opened = await realpath(`${base}/${fd}`);
+    } catch {
+      continue;
+    }
+    if (!(await inResolvedRoot([root], opened))) throw new Error(DENIED_OUTSIDE);
     return;
   }
-  if (!inAllowedRoot([root], opened)) throw new Error(DENIED_OUTSIDE);
+  throw new Error(PATH_UNAVAILABLE);
 }
 
-function readWorktreeFile(
+function characterBoundary(buffer: Buffer, index: number): { before: number; after: number } {
+  const continuation = (at: number) =>
+    at >= 0 && at < buffer.length && (buffer[at] & 0xc0) === 0x80;
+  if (!continuation(index)) return { before: index, after: index };
+  let before = index;
+  while (before > 0 && index - before < 3 && continuation(before)) before--;
+  let after = index;
+  while (after < buffer.length && after - before < 4 && continuation(after)) after++;
+  return isUtf8(buffer.subarray(before, after))
+    ? { before, after }
+    : { before: index, after: index };
+}
+
+async function readPage(
+  file: Awaited<ReturnType<typeof open>>,
+  size: number,
+  offset: number,
+  maxBytes: number,
+) {
+  const requested = Math.min(offset, size);
+  const windowStart = Math.max(0, requested - 3);
+  // Look around both edges so a split character is not mistaken for binary data.
+  const buffer = Buffer.allocUnsafe(
+    Math.min(size - windowStart, requested - windowStart + maxBytes + 6),
+  );
+  const { bytesRead } = await file.read(buffer, 0, buffer.length, windowStart);
+  const window = buffer.subarray(0, bytesRead);
+  const start = characterBoundary(window, Math.min(requested - windowStart, bytesRead)).after;
+  const edge = characterBoundary(window, Math.min(start + maxBytes, bytesRead));
+  // A page smaller than one character still has to advance.
+  const end = edge.before > start ? edge.before : edge.after;
+  return { start: windowStart + start, chunk: window.subarray(start, end) };
+}
+
+async function readWorktreeFile(
   taskId: string,
   root: string,
   target: string,
@@ -154,10 +182,10 @@ function readWorktreeFile(
   options: { offset: number; maxBytes: number },
 ) {
   const { offset, maxBytes } = options;
-  const fd = openRead(target);
+  const file = await openRead(target);
   try {
-    const stat = fstatSync(fd);
-    assertFdInside(root, fd);
+    const stat = await file.stat();
+    await assertFdInside(root, file.fd);
     if (!stat.isFile()) {
       return {
         taskId,
@@ -170,11 +198,8 @@ function readWorktreeFile(
       };
     }
     const size = stat.size;
-    const start = Math.min(offset, size);
-    const length = Math.min(maxBytes, size - start);
-    const buffer = Buffer.allocUnsafe(length);
-    const bytesRead = length === 0 ? 0 : readSync(fd, buffer, 0, length, start);
-    const chunk = buffer.subarray(0, bytesRead);
+    const { start, chunk } = await readPage(file, size, offset, maxBytes);
+    const bytesRead = chunk.length;
     const binary = chunk.includes(0) || !isUtf8(chunk);
     return {
       taskId,
@@ -193,21 +218,28 @@ function readWorktreeFile(
     if (error instanceof Error && error.message.startsWith(DENIED_PREFIX)) throw error;
     throw new Error(PATH_UNAVAILABLE, { cause: error });
   } finally {
-    closeSync(fd);
+    await file.close();
   }
 }
 
 async function viewWorktree(args: WorktreeArgs, scope: ToolScope) {
   const root = await resolveTaskRoot(args.taskId, scope);
-  const { target, relative } = resolvePath(root, args.path);
-  let stat: ReturnType<typeof statSync>;
+  const { target, relative } = await resolvePath(root, args.path);
+  let info: Stats;
   try {
-    stat = statSync(target);
+    info = await stat(target);
   } catch (error) {
     throw new Error(PATH_UNAVAILABLE, { cause: error });
   }
-  if (stat.isDirectory()) return listDirectory(args.taskId, root, target, relative);
-  if (stat.isFile()) {
+  if (info.isDirectory()) {
+    return {
+      ...(await listDirectory(args.taskId, root, target, relative)),
+      ...(args.offset !== undefined || args.maxBytes !== undefined
+        ? { note: 'offset and maxBytes apply to file reads only' }
+        : {}),
+    };
+  }
+  if (info.isFile()) {
     return readWorktreeFile(args.taskId, root, target, relative, {
       offset: args.offset ?? 0,
       maxBytes: args.maxBytes ?? DEFAULT_MAX_BYTES,
@@ -218,7 +250,7 @@ async function viewWorktree(args: WorktreeArgs, scope: ToolScope) {
     directory: root,
     path: relative,
     kind: 'other',
-    size: stat.size,
+    size: info.size,
     content: null,
     note: 'not a regular file or directory',
   };

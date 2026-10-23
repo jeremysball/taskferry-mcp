@@ -1,18 +1,19 @@
-import { realpathSync } from 'node:fs';
 import { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import { callDaemon, type Json } from './daemon.ts';
 import { listOpencodeModels } from './models.ts';
-import { inAllowedRoot } from './scope.ts';
+import { inResolvedRoot, resolveRoots } from './scope.ts';
 import {
   ALLOWLIST_REQUIRED,
   READ_ONLY,
   WRITES,
   asText,
   assertAllowedModel,
+  assertAllowedDirectory,
+  buildDispatchRequest,
   inScopeStatus,
   nonBlank,
-  resolveRoBinds,
+  readTaskResult,
   type ToolDeps,
   type ToolScope,
 } from './tools-shared.ts';
@@ -73,10 +74,10 @@ const modelArgs = z.strictObject({
   limit: z.number().int().min(1).max(200).optional(),
 });
 
-function isVisibleRow(row: unknown, roots: readonly string[]): row is Json {
+async function isVisibleRow(row: unknown, roots: readonly string[]) {
   if (typeof row !== 'object' || row === null) return false;
   const directory = (row as Json).directory;
-  return typeof directory === 'string' && inAllowedRoot(roots, directory);
+  return typeof directory === 'string' && (await inResolvedRoot(roots, directory));
 }
 
 function countStatuses(rows: readonly Json[]) {
@@ -88,38 +89,42 @@ function countStatuses(rows: readonly Json[]) {
   return counts;
 }
 
-// Lists without a directory return every task the daemon still holds, capped at its newest 500
-// rows. Filter those rows through the same allowlist the direct lookup uses, so the all-workspace
-// view cannot expose a workspace the bridge was not configured for.
-function visibleList(result: unknown, roots: readonly string[]) {
-  const tasks = (result as Json | null)?.tasks;
-  if (!Array.isArray(tasks)) return result;
-  const rows = tasks.filter((row): row is Json => isVisibleRow(row, roots));
+async function visibleList(results: unknown[], roots: readonly string[]) {
+  const rows = new Map<unknown, Json>();
+  let capped = false;
+  for (const result of results) {
+    const tasks = (result as Json | null)?.tasks;
+    if (!Array.isArray(tasks)) throw new Error('invalid task.list reply: tasks must be an array');
+    capped ||= tasks.length >= LIST_ROW_CAP;
+    for (const row of tasks) {
+      if (await isVisibleRow(row, roots)) rows.set((row as Json).id, row as Json);
+    }
+  }
+  const merged = [...rows.values()].sort((a, b) =>
+    String(b.startedAt ?? '').localeCompare(String(a.startedAt ?? '')),
+  );
+  capped ||= merged.length > LIST_ROW_CAP;
+  const tasks = merged.slice(0, LIST_ROW_CAP);
   return {
-    counts: countStatuses(rows),
-    tasks: rows,
-    ...(tasks.length >= LIST_ROW_CAP
-      ? { note: 'daemon row cap reached; older tasks may be omitted' }
-      : {}),
+    counts: countStatuses(tasks),
+    tasks,
+    ...(capped ? { note: 'daemon row cap reached; older tasks may be omitted' } : {}),
   };
 }
 
 async function listTasks(args: { directory?: string }, scope: ToolScope) {
   if (!scope.allowDirectories.length) throw new Error(ALLOWLIST_REQUIRED);
+  const roots = await resolveRoots(scope.allowDirectories);
   if (args.directory === undefined) {
-    return visibleList(
-      await callDaemon(scope.daemonSocket, 'task.list', {}),
-      scope.allowDirectories,
+    const params =
+      scope.allowDirectories.length > 1 ? roots.map((directory) => ({ directory })) : [{}];
+    const results = await Promise.all(
+      params.map((params) => callDaemon(scope, 'task.list', params)),
     );
+    return visibleList(results, roots);
   }
-  let real: string;
-  try {
-    real = realpathSync(args.directory);
-  } catch {
-    throw new Error('directory unavailable');
-  }
-  if (!inAllowedRoot(scope.allowDirectories, real)) throw new Error('directory denied');
-  return callDaemon(scope.daemonSocket, 'task.list', { directory: real });
+  const real = await assertAllowedDirectory(args.directory, scope, roots);
+  return callDaemon(scope, 'task.list', { directory: real });
 }
 
 type ModelArgs = { query?: string; limit?: number };
@@ -156,19 +161,17 @@ async function catalogModels(args: ModelArgs, scope: ToolScope, load: ToolDeps['
 type ResultArgs = { taskId: string; full?: boolean; fields?: readonly string[] };
 
 async function readResult(args: ResultArgs, scope: ToolScope) {
-  await inScopeStatus(args.taskId, scope);
-  return callDaemon(scope.daemonSocket, 'task.result', {
-    taskId: args.taskId,
-    ...(args.full === undefined ? {} : { full: args.full }),
-    ...(args.fields === undefined ? {} : { fields: args.fields }),
-  });
+  if (args.full === true && !args.fields?.includes('narration')) {
+    throw new Error('full requires fields to include narration');
+  }
+  return (await readTaskResult(args.taskId, args.fields, scope, { full: args.full })).result;
 }
 
 type SummaryArgs = { taskId: string; mode?: 'report' | 'activity'; maxWords?: number };
 
 async function summarize(args: SummaryArgs, scope: ToolScope) {
   await inScopeStatus(args.taskId, scope);
-  return callDaemon(scope.daemonSocket, 'task.summary', {
+  return callDaemon(scope, 'task.summary', {
     taskId: args.taskId,
     ...(args.mode === undefined ? {} : { mode: args.mode }),
     ...(args.maxWords === undefined ? {} : { maxWords: args.maxWords }),
@@ -183,34 +186,13 @@ type DispatchArgs = {
   roBind?: readonly string[];
 };
 
-function resolveDispatchDirectory(directory: string, scope: ToolScope) {
-  if (!scope.allowDirectories.length) {
-    throw new Error('dispatch disabled: workspace allowlist is empty');
-  }
-  let real: string;
-  try {
-    real = realpathSync(directory);
-  } catch {
-    throw new Error(`workspace unavailable: ${directory}`);
-  }
-  if (!inAllowedRoot(scope.allowDirectories, real)) {
-    throw new Error(
-      `workspace denied: ${real} is outside allowed roots (${scope.allowDirectories.join(', ')})`,
-    );
-  }
-  return real;
-}
-
 async function dispatchTask(args: DispatchArgs, scope: ToolScope) {
-  const real = resolveDispatchDirectory(args.directory, scope);
+  const real = await assertAllowedDirectory(args.directory, scope);
   assertAllowedModel(args.model, scope);
-  const readOnlyBinds = resolveRoBinds(args.roBind, scope);
-  return callDaemon(scope.daemonSocket, 'task.dispatch', {
+  return callDaemon(scope, 'task.dispatch', {
     directory: real,
     model: args.model,
-    prompt: args.prompt,
-    ...(args.variant === undefined ? {} : { variant: args.variant }),
-    ...(readOnlyBinds.length ? { roBind: readOnlyBinds } : {}),
+    ...(await buildDispatchRequest(args, scope)),
   });
 }
 
@@ -218,7 +200,7 @@ async function dispatchTask(args: DispatchArgs, scope: ToolScope) {
 // only way to a daemon method, and each handler fixes which method it sends. `taskferry_models`
 // is the one handler that runs a local command instead of a daemon method.
 export function registerTools(server: McpServer, scope: ToolScope, deps: Partial<ToolDeps> = {}) {
-  const listModels = deps.listModels ?? listOpencodeModels;
+  const listModels = deps.listModels ?? (() => listOpencodeModels(scope.limits));
   server.registerTool(
     'taskferry_health',
     {
@@ -227,7 +209,7 @@ export function registerTools(server: McpServer, scope: ToolScope, deps: Partial
       inputSchema: z.strictObject({}),
       annotations: READ_ONLY,
     },
-    async () => asText(await callDaemon(scope.daemonSocket, 'system.health', {})),
+    async () => asText(await callDaemon(scope, 'system.health', {})),
   );
 
   server.registerTool(

@@ -1,9 +1,8 @@
 import { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
-import { callDaemon, type Json } from './daemon.ts';
-import { READ_ONLY, asText, inScopeStatus, nonBlank, type ToolScope } from './tools-shared.ts';
+import { type Json } from './daemon.ts';
+import { READ_ONLY, asText, readTaskResult, nonBlank, type ToolScope } from './tools-shared.ts';
 
-const PREVIEW_CHARS = 500;
 const PAGE_MAX = 100_000;
 const OFFSET_MAX = 10_000_000;
 
@@ -17,25 +16,22 @@ const messageArgs = z.strictObject({
 type MessageArgs = z.infer<typeof messageArgs>;
 
 async function readMessage(args: MessageArgs, scope: ToolScope) {
-  await inScopeStatus(args.taskId, scope);
   // Ask for the message alone so the daemon does not parse or ship narration
   // and diff fields for a read that only needs the final turn.
-  const detail = (await callDaemon(scope.daemonSocket, 'task.result', {
-    taskId: args.taskId,
-    fields: ['message'],
-  })) as Json | null;
+  const { status, result } = await readTaskResult(args.taskId, ['message'], scope);
+  const detail = result as Json | null;
   const message = typeof detail?.message === 'string' ? detail.message : '';
   const base = {
     taskId: args.taskId,
-    status: detail?.status ?? null,
+    status: status ?? null,
     messageChars: message.length,
   };
 
   if (args.confirm !== true) {
     return {
       ...base,
-      preview: message.slice(0, PREVIEW_CHARS),
-      previewTruncated: message.length > PREVIEW_CHARS,
+      preview: message.slice(0, scope.limits.previewChars),
+      previewTruncated: message.length > scope.limits.previewChars,
       note: 'full message withheld; call again with confirm: true to read it, and use offset and limit to page a large message',
     };
   }

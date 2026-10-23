@@ -4,9 +4,10 @@ import { callDaemon } from './daemon.ts';
 import {
   asText,
   assertAllowedModel,
+  assertAllowedDirectory,
+  buildDispatchRequest,
   inScopeStatus,
   nonBlank,
-  resolveRoBinds,
   WRITES,
   type ToolScope,
 } from './tools-shared.ts';
@@ -51,12 +52,11 @@ function resolveResumeSource(current: Record<string, unknown>, scope: ToolScope)
 async function resumeTask(args: ResumeArgs, scope: ToolScope) {
   const current = (await inScopeStatus(args.taskId, scope)) as Record<string, unknown>;
   const source = resolveResumeSource(current, scope);
-  const readOnlyBinds = resolveRoBinds(args.roBind, scope);
-  return callDaemon(scope.daemonSocket, 'task.dispatch', {
+  const directory = await assertAllowedDirectory(source.directory, scope);
+  return callDaemon(scope, 'task.dispatch', {
     ...source,
-    prompt: args.prompt,
-    ...(args.variant === undefined ? {} : { variant: args.variant }),
-    ...(readOnlyBinds.length ? { roBind: readOnlyBinds } : {}),
+    directory,
+    ...(await buildDispatchRequest(args, scope)),
   });
 }
 

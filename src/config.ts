@@ -2,8 +2,17 @@ import { readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
+import { errorCode } from './errors.ts';
 
 export type Listen = { kind: 'unix'; path: string } | { kind: 'tcp'; port: number };
+
+export const DEFAULT_LIMITS = {
+  daemonTimeoutMs: 5000,
+  listTimeoutMs: 15000,
+  modelsCacheTtlMs: 60000,
+  previewChars: 500,
+};
+export type BridgeLimits = typeof DEFAULT_LIMITS;
 
 export type BridgeConfig = {
   daemonSocket: string;
@@ -12,7 +21,7 @@ export type BridgeConfig = {
   allowModels: string[];
   allowRoBinds: string[];
   listen: Listen;
-};
+} & Partial<BridgeLimits>;
 
 export class ConfigError extends Error {
   constructor(message: string, options?: ErrorOptions) {
@@ -22,6 +31,8 @@ export class ConfigError extends Error {
 }
 
 type Env = Record<string, string | undefined>;
+const DAEMON_SOCKET = 'daemon socket';
+const LISTEN_SOCKET = 'listen socket';
 
 // Flag, then env var, then config-file key, then default. Every knob is a triplet; the token is
 // the exception and is deliberately not a flag or a config key (see resolveToken).
@@ -34,6 +45,10 @@ const FLAGS = {
   'listen-socket': { type: 'string' },
   'listen-port': { type: 'string' },
   'token-file': { type: 'string' },
+  'daemon-timeout-ms': { type: 'string' },
+  'list-timeout-ms': { type: 'string' },
+  'models-cache-ttl-ms': { type: 'string' },
+  'preview-chars': { type: 'string' },
 } as const;
 
 const FILE_KEYS = [
@@ -44,6 +59,10 @@ const FILE_KEYS = [
   'listenSocket',
   'listenPort',
   'tokenFile',
+  'daemonTimeoutMs',
+  'listTimeoutMs',
+  'modelsCacheTtlMs',
+  'previewChars',
 ] as const;
 type FileKey = (typeof FILE_KEYS)[number];
 type FileConfig = Partial<Record<FileKey, unknown>>;
@@ -79,7 +98,7 @@ function readFileConfig(file: string, required: boolean): FileConfig {
   try {
     text = readFileSync(file, 'utf8');
   } catch (e) {
-    if (!required && (e as { code?: string }).code === 'ENOENT') return {};
+    if (!required && errorCode(e) === 'ENOENT') return {};
     throw new ConfigError(`cannot read config file ${file}: ${(e as Error).message}`, { cause: e });
   }
   let parsed: unknown;
@@ -143,7 +162,7 @@ function asPort(name: string, value: unknown): number {
 
 function resolveDaemonSocket(flag: string | undefined, env: Env, file: FileConfig): string {
   const found = firstFound<unknown>(flag, fromEnv(env, 'TASKFERRY_SOCKET_PATH'), file.daemonSocket);
-  if (found) return absolute('daemon socket', asString('daemon socket', found.value));
+  if (found) return absolute(DAEMON_SOCKET, asString(DAEMON_SOCKET, found.value));
   // The daemon's own default (src/paths.js there): <runtime dir>/daemon.sock.
   const runtime =
     fromEnv(env, 'TASKFERRY_RUNTIME_DIR') ??
@@ -153,7 +172,7 @@ function resolveDaemonSocket(flag: string | undefined, env: Env, file: FileConfi
       'daemon socket not set: pass --daemon-socket, set TASKFERRY_SOCKET_PATH, or set XDG_RUNTIME_DIR',
     );
   }
-  return path.join(runtime, 'daemon.sock');
+  return absolute(DAEMON_SOCKET, path.join(runtime, 'daemon.sock'));
 }
 
 function resolveListen(
@@ -180,7 +199,7 @@ function resolveListen(
   if (socket) {
     return {
       kind: 'unix',
-      path: absolute('listen socket', asString('listen socket', socket.value)),
+      path: absolute(LISTEN_SOCKET, asString(LISTEN_SOCKET, socket.value)),
     };
   }
   if (!env.XDG_RUNTIME_DIR) {
@@ -188,13 +207,16 @@ function resolveListen(
       'listen socket not set: pass --listen-socket, set TASKFERRY_MCP_LISTEN_SOCKET, or set XDG_RUNTIME_DIR',
     );
   }
-  return { kind: 'unix', path: path.join(env.XDG_RUNTIME_DIR, 'taskferry-mcp', 'mcp.sock') };
+  return {
+    kind: 'unix',
+    path: absolute(LISTEN_SOCKET, path.join(env.XDG_RUNTIME_DIR, 'taskferry-mcp', 'mcp.sock')),
+  };
 }
 
 // The bearer token comes from TASKFERRY_MCP_TOKEN or from a file only. A flag would show up in
 // `ps`, and a config key would travel with a config file that gets copied, diffed and backed up.
 function resolveToken(tokenFile: Found<unknown> | undefined, env: Env): string {
-  const direct = env.TASKFERRY_MCP_TOKEN?.trim() ? env.TASKFERRY_MCP_TOKEN : undefined;
+  const direct = env.TASKFERRY_MCP_TOKEN?.trim() || undefined;
   if (direct !== undefined && tokenFile) {
     throw new ConfigError('set either TASKFERRY_MCP_TOKEN or a token file, not both');
   }
@@ -223,7 +245,13 @@ function resolveToken(tokenFile: Found<unknown> | undefined, env: Env): string {
   return token;
 }
 
-export function resolveConfig({ argv, env }: { argv: string[]; env: Env }): BridgeConfig {
+export function resolveConfig({
+  argv,
+  env,
+}: {
+  argv: string[];
+  env: Env;
+}): BridgeConfig & BridgeLimits {
   const flags = parseFlags(argv);
   const explicitFile = firstFound(flags.config, fromEnv(env, 'TASKFERRY_MCP_CONFIG'));
   const file = explicitFile
@@ -252,6 +280,7 @@ export function resolveConfig({ argv, env }: { argv: string[]; env: Env }): Brid
   );
 
   return {
+    ...resolveLimits(flags, env, file),
     daemonSocket: resolveDaemonSocket(flags['daemon-socket'], env, file),
     token: resolveToken(tokenFile, env),
     allowDirectories: directories
@@ -262,5 +291,46 @@ export function resolveConfig({ argv, env }: { argv: string[]; env: Env }): Brid
     allowModels: models ? asList('allowed models', models.value, ',') : [],
     allowRoBinds: roBinds ? asBindRoots('allowed read-only binds', roBinds.value) : [],
     listen: resolveListen(flags, env, file),
+  };
+}
+
+function positiveInt(name: string, value: unknown): number {
+  const number = typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : value;
+  if (typeof number !== 'number' || !Number.isSafeInteger(number) || number <= 0) {
+    throw new ConfigError(`${name} must be a positive safe integer`);
+  }
+  return number;
+}
+
+function resolveLimits(flags: ReturnType<typeof parseFlags>, env: Env, file: FileConfig) {
+  const limit = (key: FileKey, flag: keyof typeof FLAGS, variable: string, fallback: number) => {
+    const found = firstFound<unknown>(flags[flag], fromEnv(env, variable), file[key]);
+    return positiveInt(key, found ? found.value : fallback);
+  };
+  return {
+    daemonTimeoutMs: limit(
+      'daemonTimeoutMs',
+      'daemon-timeout-ms',
+      'TASKFERRY_MCP_DAEMON_TIMEOUT_MS',
+      DEFAULT_LIMITS.daemonTimeoutMs,
+    ),
+    listTimeoutMs: limit(
+      'listTimeoutMs',
+      'list-timeout-ms',
+      'TASKFERRY_MCP_LIST_TIMEOUT_MS',
+      DEFAULT_LIMITS.listTimeoutMs,
+    ),
+    modelsCacheTtlMs: limit(
+      'modelsCacheTtlMs',
+      'models-cache-ttl-ms',
+      'TASKFERRY_MCP_MODELS_CACHE_TTL_MS',
+      DEFAULT_LIMITS.modelsCacheTtlMs,
+    ),
+    previewChars: limit(
+      'previewChars',
+      'preview-chars',
+      'TASKFERRY_MCP_PREVIEW_CHARS',
+      DEFAULT_LIMITS.previewChars,
+    ),
   };
 }

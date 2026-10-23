@@ -36,12 +36,8 @@ async function serveMcp(
     capabilities: { tools: { listChanged: false } },
     instructions: INSTRUCTIONS,
   });
-  const scope = {
-    daemonSocket: config.daemonSocket,
-    allowDirectories: config.allowDirectories,
-    allowModels: config.allowModels,
-    allowRoBinds: config.allowRoBinds,
-  };
+  const { buildToolScope } = await import('./tools-shared.ts');
+  const scope = buildToolScope(config);
   registerTools(server, scope, deps);
   registerChangesetTools(server, scope);
   registerWorktreeTool(server, scope);

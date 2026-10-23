@@ -3,14 +3,14 @@ import net from 'node:net';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import type { BridgeConfig } from '../src/config.ts';
+import { DEFAULT_LIMITS, type BridgeConfig } from '../src/config.ts';
 import type { ToolDeps } from '../src/tools.ts';
 import { createBridge } from '../src/server.ts';
+export { TASK_STATUS } from '../src/tools-shared.ts';
 
 export const TOKEN = 'correct-secret';
 export const HEALTH = 'taskferry_health';
 export const STATUS_TOOL = 'taskferry_status';
-export const TASK_STATUS = 'task.status';
 
 export type Call = { id: string; method: string; params: Record<string, unknown> };
 export type Reply = {
@@ -47,7 +47,7 @@ export async function serve(server: http.Server) {
 
 function writeChunks(c: net.Socket, out: string | Buffer[]) {
   if (typeof out === 'string') c.write(out);
-  else out.forEach((part, i) => setTimeout(() => c.write(part), i * 20));
+  else out.forEach((part, i) => setTimeout(() => c.write(part), i));
 }
 
 // A daemon that answers every request line with whatever `reply` returns: one write for a
@@ -105,6 +105,7 @@ export async function startBridge(
       allowModels: [],
       allowRoBinds: [],
       listen: { kind: 'tcp', port: 0 },
+      ...DEFAULT_LIMITS,
       ...overrides,
     },
     deps,
@@ -172,7 +173,7 @@ export function send(url: string, body: string | Buffer[], options: SendOptions 
     req.on('error', reject);
     const parts = typeof body === 'string' ? [Buffer.from(body)] : body;
     parts.forEach((part, i) =>
-      setTimeout(() => (i === parts.length - 1 ? req.end(part) : req.write(part)), i * 25),
+      setTimeout(() => (i === parts.length - 1 ? req.end(part) : req.write(part)), i),
     );
   });
 }
