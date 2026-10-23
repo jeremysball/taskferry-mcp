@@ -52,19 +52,27 @@ npm start
 
 Each setting resolves as flag, then environment variable, then config-file key, then default.
 
-| Flag                    | Environment                     | Config key           | Default                                   |
-| ----------------------- | ------------------------------- | -------------------- | ----------------------------------------- |
-| `--daemon-socket`       | `TASKFERRY_SOCKET_PATH`         | `daemonSocket`       | `$TASKFERRY_RUNTIME_DIR/daemon.sock`      |
-| `--allowed-directories` | `TASKFERRY_ALLOWED_DIRECTORIES` | `allowedDirectories` | none                                      |
-| `--allowed-models`      | `TASKFERRY_ALLOWED_MODELS`      | `allowedModels`      | none                                      |
-| `--allowed-ro-binds`    | `TASKFERRY_ALLOWED_RO_BINDS`    | `allowedRoBinds`     | none                                      |
-| `--listen-socket`       | `TASKFERRY_MCP_LISTEN_SOCKET`   | `listenSocket`       | `$XDG_RUNTIME_DIR/taskferry-mcp/mcp.sock` |
-| `--listen-port`         | `TASKFERRY_MCP_LISTEN_PORT`     | `listenPort`         | none                                      |
-| `--token-file`          | `TASKFERRY_MCP_TOKEN_FILE`      | `tokenFile`          | none                                      |
+| Flag                    | Environment                         | Config key           | Default                                   |
+| ----------------------- | ----------------------------------- | -------------------- | ----------------------------------------- |
+| `--daemon-socket`       | `TASKFERRY_SOCKET_PATH`             | `daemonSocket`       | `$TASKFERRY_RUNTIME_DIR/daemon.sock`      |
+| `--allowed-directories` | `TASKFERRY_ALLOWED_DIRECTORIES`     | `allowedDirectories` | none                                      |
+| `--allowed-models`      | `TASKFERRY_ALLOWED_MODELS`          | `allowedModels`      | none                                      |
+| `--allowed-ro-binds`    | `TASKFERRY_ALLOWED_RO_BINDS`        | `allowedRoBinds`     | none                                      |
+| `--listen-socket`       | `TASKFERRY_MCP_LISTEN_SOCKET`       | `listenSocket`       | `$XDG_RUNTIME_DIR/taskferry-mcp/mcp.sock` |
+| `--listen-port`         | `TASKFERRY_MCP_LISTEN_PORT`         | `listenPort`         | none                                      |
+| `--token-file`          | `TASKFERRY_MCP_TOKEN_FILE`          | `tokenFile`          | none                                      |
+| `--daemon-timeout-ms`   | `TASKFERRY_MCP_DAEMON_TIMEOUT_MS`   | `daemonTimeoutMs`    | `5000`                                    |
+| `--list-timeout-ms`     | `TASKFERRY_MCP_LIST_TIMEOUT_MS`     | `listTimeoutMs`      | `15000`                                   |
+| `--models-cache-ttl-ms` | `TASKFERRY_MCP_MODELS_CACHE_TTL_MS` | `modelsCacheTtlMs`   | `60000`                                   |
+| `--preview-chars`       | `TASKFERRY_MCP_PREVIEW_CHARS`       | `previewChars`       | `500`                                     |
 
 `--config` and `TASKFERRY_MCP_CONFIG` name a config file; the default is `$XDG_CONFIG_HOME/taskferry-mcp/config.json`. Directory lists split on `:`, model lists on `,`, and read-only bind lists on `:`.
 
+The timeout and preview knobs bound a slow call and a large response. `daemonTimeoutMs` is the per-call daemon socket timeout; `listTimeoutMs` bounds the `opencode models` catalog command; `modelsCacheTtlMs` is how long that catalog is cached; `previewChars` is the unconfirmed `taskferry_message` preview length.
+
 The bearer token comes from `TASKFERRY_MCP_TOKEN` or a token file, never both. A token file must not be readable by group or others, and the bridge refuses an empty one. The token is not a flag or a config key, because both leak through `ps`, backups, and diffs.
+
+Both surfaces require the exact `Bearer <token>` authorization form: a bare token or any other scheme is refused with 401 at the HTTP layer. The gateway applies the same loopback `Host`/`Origin` checks as the bridge's TCP mode, and both answer every request, refusals included, with `Cache-Control: no-store`.
 
 For a client that only speaks HTTP, use a loopback TCP port:
 
@@ -83,11 +91,11 @@ export TASKFERRY_MCP_TOKEN='replace-with-random-secret'
 npm run gateway
 ```
 
-`gateway.ts` forwards one configured `/mcp` endpoint with separate inbound and upstream tokens, and listens on port 8788 by default. It is a reference implementation. Sites support for this runtime is unverified.
+`gateway.ts` forwards one configured `/mcp` endpoint with separate inbound and upstream tokens, and listens on port 8788 by default. Like the bridge's TCP mode, it binds `127.0.0.1` only; reaching it from elsewhere is the job of an authenticated proxy. It is a reference implementation. Sites support for this runtime is unverified.
 
 ## Scope guard
 
-`taskferry_status`, `taskferry_result` and `taskferry_summary` read `task.status` and check the canonical `directory` against the allowed roots before they return status, request result content or queue a summary. A missing or unresolvable directory fails closed. The check lives in `src/scope.ts` and runs from `src/tools.ts`.
+`taskferry_status`, `taskferry_result` and `taskferry_summary` read `task.status` and check the canonical `directory` against the allowed roots before they return status, request result content or queue a summary. A missing or unresolvable directory fails closed. The root check is `inAllowedRoot` in `src/scope.ts`; the scoped status read is `inScopeStatus` in `src/tools-shared.ts`.
 
 `taskferry_list` without a directory asks the daemon for its newest 500 tasks and filters the rows through the same allowed roots. Passing a directory scopes the list to that workspace, which must itself be under an allowed root.
 
@@ -95,7 +103,7 @@ An unknown task ID and an out-of-scope one both answer "task not accessible", wh
 
 `taskferry_result` accepts `fields` to select result fields and `full` to return the complete narration. `taskferry_summary` wraps `task.summary`: it returns a queued summary task in `summaryTask`, and the caller polls `taskferry_status` and reads `taskferry_result` against that id. `mode: "activity"` reads cached activity without spawning a worker; `mode: "report"` (the default) queues a summarizer.
 
-`taskferry_models` shells out to `opencode models` and caches the result for 60 seconds. Without a query it returns the allowlisted model ids only. With a query it searches the full installed catalog and marks each match as allowed or not. `missingAllowedModels` names allowlisted ids that are not installed, which catches an allowlist typo before a dispatch fails.
+`taskferry_models` shells out to `opencode models` and caches the result for 60 seconds (`modelsCacheTtlMs`). Without a query it returns the allowlisted model ids only. With a query it searches the full installed catalog and marks each match as allowed or not. `missingAllowedModels` names allowlisted ids that are not installed, which catches an allowlist typo before a dispatch fails.
 
 `taskferry_dispatch` accepts an optional `variant` string for the model reasoning level, for example `low`, `high`, `xhigh`, `max`, or `highest`; it forwards the value to the daemon as `variant` and omits it when unset. A denied request says whether the workspace or the model failed and includes the allowed models.
 
@@ -130,8 +138,11 @@ path it lists the dispatch directory; a directory path lists that directory; a
 file path returns its text. Every path is resolved with `realpathSync` and must
 stay inside the task directory, so `..`, absolute paths, and symlinks pointing
 outside are refused. A file read returns at most 256 KiB by default; pass
-`offset` and `maxBytes` to page, and `binary: true` when the bytes are not
-UTF-8 text. Entries are capped at 500 rows per listing.
+`offset` and `maxBytes` to page by byte offset. The response reports `offset`,
+`bytesRead`, and `truncated`, so the next page starts at `offset + bytesRead`.
+Bytes that are not UTF-8 text come back with `binary: true` and no content.
+Directory listings are capped at 500 rows and are not paged, so a byte offset
+has no meaning there.
 
 ## Full final message
 
@@ -140,7 +151,8 @@ UTF-8 text. Entries are capped at 500 rows per listing.
 returns `messageChars` and a 500-character preview, which keeps a large message
 out of the client's context until the caller explicitly asks for it. With
 `confirm: true` it returns the whole message, or a page when `offset` and
-`limit` are set. `nextOffset` names the next page when more remains. A
+`limit` are set (both counted in characters). `nextOffset` names the next
+character offset when more remains. A
 non-confirmed call ignores `offset` and `limit`, so paging cannot be used to
 walk the full message without confirming.
 
@@ -155,11 +167,11 @@ walk the full message without confirming.
 
 ## Evidence
 
-`docs/evidence/2026-10-20-prototype-v2/` holds the prototype's original logs, unedited. Paths inside them come from the machine that produced them.
+`docs/evidence/` holds verbatim logs from named points in the project's history. `docs/evidence/README.md` records the branch and commit behind each capture, and why their absolute host paths are left as recorded. These are historical captures, not the current suite state; run `mise run check` for today's tree.
 
-- `red.log`: initial module-missing test failure. It does not count as assertion-based RED.
-- `green.log`: five passing mock tests after the fixture allowlist was fixed.
-- `mutation.log`: a change to daemon method forwarding failed one test, then was reverted.
-- `scope-red.log`, `scope-green.log`, `scope-mutation.log`, `scope-final.log`: the same sequence for the scope guard.
-
-`docs/evidence/2026-10-21-sdk-transport/` holds this refactor's gate output (`check.log`), two mutation probes (`mutation-scope.log`, `mutation-socket-mode.log`), a CLI smoke run (`smoke.log`), and a live daemon pass (`real-daemon.log`) covering the task tools and one dispatch (`oc_mvi1xlws_1804d533`) that returned `MCP_REAL_DISPATCH_OK`.
+- `docs/evidence/2026-10-20-prototype-v2/`: the prototype's first test loop.
+  - `red.log`: initial module-missing test failure. It does not count as assertion-based RED.
+  - `green.log`: five passing mock tests after the fixture allowlist was fixed.
+  - `mutation.log`: a change to daemon method forwarding failed one test, then was reverted.
+  - `scope-red.log`, `scope-green.log`, `scope-mutation.log`, `scope-final.log`: the same sequence for the scope guard.
+- `docs/evidence/2026-10-21-sdk-transport/`: the SDK-transport refactor's captures, including the full gate at that commit (`check.log`, 37 cases), two mutation probes (`mutation-scope.log`, `mutation-socket-mode.log`), a CLI smoke run (`smoke.log`), and a live daemon pass (`real-daemon.log`) covering the task tools and one dispatch (`oc_mvi1xlws_1804d533`) that returned `MCP_REAL_DISPATCH_OK`.
