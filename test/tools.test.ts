@@ -29,6 +29,11 @@ const INITIALIZE = {
   clientInfo: { name: 'raw-test', version: '0.0.0' },
 };
 
+const WORKER_BINDS = ['skills/searching-the-web', 'skills/using-chhoto'];
+const CONTROLLER_BINDS = ['skills', 'fleet-skills', 'plugins/cache'];
+const bindsUnder = (root: string, relative: readonly string[]) =>
+  relative.map((entry) => path.join(root, entry));
+
 test('initialize, discovery and daemon mapping, including fragmented socket responses', async () => {
   const f = await fixture();
   try {
@@ -276,19 +281,121 @@ test('read-only binds are allowlisted, resolved and forwarded only when requeste
     const allowed = await dispatch([allowedFile, settings]);
     assert.notEqual(allowed.result?.isError, true);
     assert.equal(daemon.calls.length, 1);
-    assert.deepEqual(daemon.calls[0]?.params.roBind, [realAllowedFile, realpathSync(settings)]);
+    assert.deepEqual(daemon.calls[0]?.params.roBind, [
+      ...bindsUnder(bridge.skillRoot, WORKER_BINDS),
+      realAllowedFile,
+      realpathSync(settings),
+    ]);
 
     const withoutBind = await call(
       bridge.url,
       toolCall('taskferry_dispatch', { directory: daemon.dir, prompt: 'hi', model }),
     );
     assert.notEqual(withoutBind.result?.isError, true);
-    assert.equal(daemon.calls[1]?.params.roBind, undefined);
+    assert.deepEqual(daemon.calls[1]?.params.roBind, bindsUnder(bridge.skillRoot, WORKER_BINDS));
   } finally {
     await bridge.close();
     await daemon.close();
     removeDir(allowedDir);
     removeDir(outsideDir);
+  }
+});
+
+test('the controller skill profile mounts every skill root', async () => {
+  const daemon = await stubDaemon((req) => okReply(req, { id: 'new-task' }));
+  const model = 'good';
+  const bridge = await startBridge(daemon.socket, {
+    allowDirectories: [daemon.dir],
+    allowModels: [model],
+    skillProfile: 'controller',
+  });
+  try {
+    const res = await call(
+      bridge.url,
+      toolCall('taskferry_dispatch', { directory: daemon.dir, prompt: 'hi', model }),
+    );
+    assert.notEqual(res.result?.isError, true);
+    assert.deepEqual(
+      daemon.calls[0]?.params.roBind,
+      bindsUnder(bridge.skillRoot, CONTROLLER_BINDS),
+    );
+  } finally {
+    await bridge.close();
+    await daemon.close();
+  }
+});
+
+test('the none profile mounts no skill paths and omits roBind', async () => {
+  const daemon = await stubDaemon((req) => okReply(req, { id: 'new-task' }));
+  const model = 'good';
+  const bridge = await startBridge(daemon.socket, {
+    allowDirectories: [daemon.dir],
+    allowModels: [model],
+    skillProfile: 'none',
+  });
+  try {
+    const res = await call(
+      bridge.url,
+      toolCall('taskferry_dispatch', { directory: daemon.dir, prompt: 'hi', model }),
+    );
+    assert.notEqual(res.result?.isError, true);
+    assert.equal(daemon.calls[0]?.params.roBind, undefined);
+  } finally {
+    await bridge.close();
+    await daemon.close();
+  }
+});
+
+test('profile and server binds skip an empty caller allowlist', async () => {
+  const daemon = await stubDaemon((req) => okReply(req, { id: 'new-task' }));
+  const bindDir = tempDir('tf-server-bind-');
+  const serverBind = path.join(bindDir, 'settings.json');
+  writeFileSync(serverBind, '{}');
+  const model = 'good';
+  const bridge = await startBridge(daemon.socket, {
+    allowDirectories: [daemon.dir],
+    allowModels: [model],
+    serverRoBinds: [serverBind],
+  });
+  try {
+    const res = await call(
+      bridge.url,
+      toolCall('taskferry_dispatch', { directory: daemon.dir, prompt: 'hi', model }),
+    );
+    assert.notEqual(res.result?.isError, true);
+    assert.deepEqual(daemon.calls[0]?.params.roBind, [
+      ...bindsUnder(bridge.skillRoot, WORKER_BINDS),
+      realpathSync(serverBind),
+    ]);
+  } finally {
+    await bridge.close();
+    await daemon.close();
+    removeDir(bindDir);
+  }
+});
+
+test('a missing server bind fails the dispatch instead of mounting less', async () => {
+  const daemon = await stubDaemon((req) => okReply(req, { id: 'new-task' }));
+  const skillRoot = tempDir('tf-skills-partial-');
+  mkdirSync(path.join(skillRoot, WORKER_BINDS[0]), { recursive: true });
+  const model = 'good';
+  const bridge = await startBridge(daemon.socket, {
+    allowDirectories: [daemon.dir],
+    allowModels: [model],
+    skillRoot,
+  });
+  try {
+    const res = await call(
+      bridge.url,
+      toolCall('taskferry_dispatch', { directory: daemon.dir, prompt: 'hi', model }),
+    );
+    assert.equal(res.result?.isError, true);
+    assert.match(res.result?.content?.[0]?.text ?? '', /server bind unavailable/);
+    assert.equal(daemon.calls.length, 0);
+  } finally {
+    await bridge.close();
+    await daemon.close();
+    removeDir(skillRoot);
   }
 });
 

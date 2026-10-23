@@ -58,6 +58,9 @@ Each setting resolves as flag, then environment variable, then config-file key, 
 | `--allowed-directories` | `TASKFERRY_ALLOWED_DIRECTORIES`     | `allowedDirectories` | none                                      |
 | `--allowed-models`      | `TASKFERRY_ALLOWED_MODELS`          | `allowedModels`      | none                                      |
 | `--allowed-ro-binds`    | `TASKFERRY_ALLOWED_RO_BINDS`        | `allowedRoBinds`     | none                                      |
+| `--skill-profile`       | `TASKFERRY_MCP_SKILL_PROFILE`       | `skillProfile`       | `worker`                                  |
+| `--skill-root`          | `TASKFERRY_MCP_SKILL_ROOT`          | `skillRoot`          | `~/.claude`                               |
+| `--server-ro-binds`     | `TASKFERRY_MCP_SERVER_RO_BINDS`     | `serverRoBinds`      | none                                      |
 | `--listen-socket`       | `TASKFERRY_MCP_LISTEN_SOCKET`       | `listenSocket`       | `$XDG_RUNTIME_DIR/taskferry-mcp/mcp.sock` |
 | `--listen-port`         | `TASKFERRY_MCP_LISTEN_PORT`         | `listenPort`         | none                                      |
 | `--token-file`          | `TASKFERRY_MCP_TOKEN_FILE`          | `tokenFile`          | none                                      |
@@ -66,7 +69,7 @@ Each setting resolves as flag, then environment variable, then config-file key, 
 | `--models-cache-ttl-ms` | `TASKFERRY_MCP_MODELS_CACHE_TTL_MS` | `modelsCacheTtlMs`   | `60000`                                   |
 | `--preview-chars`       | `TASKFERRY_MCP_PREVIEW_CHARS`       | `previewChars`       | `500`                                     |
 
-`--config` and `TASKFERRY_MCP_CONFIG` name a config file; the default is `$XDG_CONFIG_HOME/taskferry-mcp/config.json`. Directory lists split on `:`, model lists on `,`, and read-only bind lists on `:`.
+`--config` and `TASKFERRY_MCP_CONFIG` name a config file; the default is `$XDG_CONFIG_HOME/taskferry-mcp/config.json`. Directory lists split on `:`, model lists on `,`, and caller and server bind lists on `:`.
 
 The timeout and preview knobs bound a slow call and a large response. `daemonTimeoutMs` is the per-call daemon socket timeout; `listTimeoutMs` bounds the `opencode models` catalog command; `modelsCacheTtlMs` is how long that catalog is cached; `previewChars` is the unconfirmed `taskferry_message` preview length.
 
@@ -108,6 +111,18 @@ An unknown task ID and an out-of-scope one both answer "task not accessible", wh
 `taskferry_dispatch` accepts an optional `variant` string for the model reasoning level, for example `low`, `high`, `xhigh`, `max`, or `highest`; it forwards the value to the daemon as `variant` and omits it when unset. A denied request says whether the workspace or the model failed and includes the allowed models.
 
 `taskferry_dispatch` also accepts an optional `roBind` array of absolute host paths. Each path is resolved with `realpathSync` and must be on the read-only bind allowlist, either as the exact file or under an allowed directory. The bridge forwards the resolved paths to the daemon as `roBind`, which mounts each one read-only at the same path inside the task sandbox. There is no read-write bind surface.
+
+## Skill profiles
+
+`skillProfile` fixes which Claude skills every dispatch and resume mounts read-only:
+
+- `none` mounts no skill paths.
+- `worker` (default) mounts the two default search skills.
+- `controller` mounts the skill, fleet-skill, and plugin-cache roots, which lets the fleet-skill symlinks resolve.
+
+The authoritative root lists live in `src/skills.ts`. Every path is resolved and must exist; a missing root fails the dispatch with `server bind unavailable: <path>` instead of silently mounting less. Roots are joined under `skillRoot` (`--skill-root`, `TASKFERRY_MCP_SKILL_ROOT`, or `skillRoot` in the config file; default `~/.claude`). `serverRoBinds` (`--server-ro-binds`, `TASKFERRY_MCP_SERVER_RO_BINDS`, or `serverRoBinds`) adds extra operator-owned roots to every dispatch and resume.
+
+Profile and server binds are server-owned, so they skip the caller `roBind` allowlist; a caller-supplied `roBind` still goes through it. When a mounted path is on the daemon's sandbox deny list, as the default `~/.claude` is, every launch logs one deny-list-override warning to the daemon log; the mount is read-only and adds no write path. See `docs/things-that-look-like-bugs.md`.
 
 ## Resume
 

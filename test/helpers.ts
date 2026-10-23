@@ -1,6 +1,6 @@
 import http from 'node:http';
 import net from 'node:net';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { DEFAULT_LIMITS, type BridgeConfig } from '../src/config.ts';
@@ -32,6 +32,39 @@ export type Reply = {
 
 export const tempDir = (prefix: string) => mkdtempSync(path.join(tmpdir(), prefix));
 export const removeDir = (dir: string) => rmSync(dir, { recursive: true, force: true });
+
+const SKILL_ROOT_PARTS = [
+  'skills/searching-the-web',
+  'skills/using-chhoto',
+  'fleet-skills',
+  'plugins/cache',
+];
+
+// A canonical temp skill root holding every path a profile can mount. `realpathSync` keeps the
+// literal expected paths stable on hosts where the temp directory is itself a symlink.
+export function createSkillRoot() {
+  const dir = realpathSync(tempDir('tf-skills-'));
+  for (const part of SKILL_ROOT_PARTS) mkdirSync(path.join(dir, part), { recursive: true });
+  return dir;
+}
+
+// The single source of test bridge config. Production defaults come from resolveConfig; this
+// factory exists so a new required field updates every test once.
+export function bridgeConfig(overrides: Partial<BridgeConfig> = {}): BridgeConfig {
+  return {
+    daemonSocket: '',
+    token: TOKEN,
+    allowDirectories: [],
+    allowModels: [],
+    allowRoBinds: [],
+    skillProfile: 'worker',
+    skillRoot: path.join(tmpdir(), 'tf-skill-root-unused'),
+    serverRoBinds: [],
+    listen: { kind: 'tcp', port: 0 },
+    ...DEFAULT_LIMITS,
+    ...overrides,
+  };
+}
 
 export const listenOnSocket = (server: net.Server, socketPath: string) =>
   new Promise<void>((resolve) => server.listen(socketPath, resolve));
@@ -92,26 +125,33 @@ export const daemonError = (id: string, code: string, message: string) =>
   }) + '\n';
 
 // Starts a bridge on a free loopback port in front of `daemonSocket` and resolves to its /mcp URL.
+// Unless the caller supplies `skillRoot`, the bridge gets a temp root holding every profile path,
+// and that root is removed when the bridge closes.
 export async function startBridge(
   daemonSocket: string,
   overrides: Partial<BridgeConfig> = {},
   deps: Partial<ToolDeps> = {},
 ) {
+  const ownsSkillRoot = overrides.skillRoot === undefined;
+  const skillRoot = overrides.skillRoot ?? createSkillRoot();
   const bridge = createBridge(
-    {
-      daemonSocket,
-      token: TOKEN,
-      allowDirectories: [],
-      allowModels: [],
-      allowRoBinds: [],
-      listen: { kind: 'tcp', port: 0 },
-      ...DEFAULT_LIMITS,
+    bridgeConfig({
       ...overrides,
-    },
+      daemonSocket,
+      skillRoot,
+      listen: overrides.listen ?? { kind: 'tcp', port: 0 },
+    }),
     deps,
   );
   const url = await serve(bridge);
-  return { url, close: () => stop(bridge) };
+  return {
+    url,
+    skillRoot,
+    close: async () => {
+      await stop(bridge);
+      if (ownsSkillRoot) removeDir(skillRoot);
+    },
+  };
 }
 
 // A daemon that answers task.list and everything else with a canned result, splitting every
@@ -126,7 +166,13 @@ export async function fixture(overrides: Partial<BridgeConfig> = {}) {
     await bridge.close();
     await daemon.close();
   };
-  return { calls: daemon.calls, dir: daemon.dir, url: bridge.url, close };
+  return {
+    calls: daemon.calls,
+    dir: daemon.dir,
+    url: bridge.url,
+    skillRoot: bridge.skillRoot,
+    close,
+  };
 }
 
 export const rpc = (method: string, params: Record<string, unknown> = {}, id: number | null = 1) =>

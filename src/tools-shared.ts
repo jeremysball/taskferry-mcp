@@ -4,12 +4,16 @@ import { z } from 'zod';
 import { DaemonError, callDaemon, type Json } from './daemon.ts';
 import { inAllowedRoot, inResolvedRoot, resolveRoots } from './scope.ts';
 import { DEFAULT_LIMITS, type BridgeConfig, type BridgeLimits } from './config.ts';
+import { skillBindPaths, type SkillProfile } from './skills.ts';
 
 export type ToolScope = {
   daemonSocket: string;
   allowDirectories: readonly string[];
   allowModels: readonly string[];
   allowRoBinds: readonly string[];
+  skillProfile: SkillProfile;
+  skillRoot: string;
+  serverRoBinds: readonly string[];
   limits: BridgeLimits;
 };
 
@@ -19,6 +23,9 @@ export function buildToolScope(config: BridgeConfig): ToolScope {
     allowDirectories: config.allowDirectories,
     allowModels: config.allowModels,
     allowRoBinds: config.allowRoBinds,
+    skillProfile: config.skillProfile,
+    skillRoot: config.skillRoot,
+    serverRoBinds: config.serverRoBinds,
     limits: {
       daemonTimeoutMs: config.daemonTimeoutMs ?? DEFAULT_LIMITS.daemonTimeoutMs,
       listTimeoutMs: config.listTimeoutMs ?? DEFAULT_LIMITS.listTimeoutMs,
@@ -89,14 +96,29 @@ export function assertAllowedModel(model: string, scope: ToolScope) {
   }
 }
 
-// Resolve each requested read-only bind against the bridge allowlist. Resolving symlinks before
-// the check keeps a link from smuggling in a target the allowlist never named.
-export async function resolveRoBinds(requested: readonly string[] | undefined, scope: ToolScope) {
-  if (requested === undefined || requested.length === 0) return [];
+// Resolve every read-only bind for a dispatch or resume. Server-owned binds (`always`, from the
+// skill profile and `serverRoBinds`) are resolved and required to exist, but skip the caller
+// allowlist because no tool argument chooses them. Caller bindings still go through that
+// allowlist. Resolving symlinks before the check keeps a link from smuggling in a target the
+// allowlist never named.
+export async function resolveRoBinds(
+  requested: readonly string[] | undefined,
+  scope: ToolScope,
+  always: readonly string[] = [],
+) {
+  const resolved = new Set<string>();
+  for (const bindPath of always) {
+    if (!path.isAbsolute(bindPath)) throw new Error(`server bind must be absolute: ${bindPath}`);
+    try {
+      resolved.add(await realpath(bindPath));
+    } catch {
+      throw new Error(`server bind unavailable: ${bindPath}`);
+    }
+  }
+  if (requested === undefined || requested.length === 0) return [...resolved];
   if (!scope.allowRoBinds.length) {
     throw new Error('read-only bind disabled until allowlist configured');
   }
-  const resolved = new Set<string>();
   for (const requestedPath of requested) {
     if (!path.isAbsolute(requestedPath)) throw new Error('bind path must be absolute');
     let real: string;
@@ -150,7 +172,11 @@ export async function buildDispatchRequest(
   args: { prompt: string; variant?: string; roBind?: readonly string[] },
   scope: ToolScope,
 ) {
-  const readOnlyBinds = await resolveRoBinds(args.roBind, scope);
+  const serverBinds = [
+    ...skillBindPaths(scope.skillProfile, scope.skillRoot),
+    ...scope.serverRoBinds,
+  ];
+  const readOnlyBinds = await resolveRoBinds(args.roBind, scope, serverBinds);
   return {
     prompt: args.prompt,
     ...(args.variant === undefined ? {} : { variant: args.variant }),

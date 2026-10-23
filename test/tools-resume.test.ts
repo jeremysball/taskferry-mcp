@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync } from 'node:fs';
+import path from 'node:path';
 import {
   TASK_STATUS,
   type Call,
@@ -24,6 +25,10 @@ const DONE = 'done';
 const RUNNING = 'running';
 const FOREIGN_DIRECTORY = '/private/other-project';
 const TASK_DISPATCH = 'task.dispatch';
+const WORKER_BINDS = ['skills/searching-the-web', 'skills/using-chhoto'];
+const CONTROLLER_BINDS = ['skills', 'fleet-skills', 'plugins/cache'];
+const bindsUnder = (root: string, relative: readonly string[]) =>
+  relative.map((entry) => path.join(root, entry));
 
 type TaskFields = {
   directory: string;
@@ -80,7 +85,7 @@ test('resume derives the workspace, model and session from the source task', asy
             prompt: PROMPT,
             sessionId: SESSION_ID,
             variant: 'high',
-            roBind: [credential],
+            roBind: [...bindsUnder(bridge.skillRoot, WORKER_BINDS), credential],
           },
         ],
       ],
@@ -89,6 +94,36 @@ test('resume derives the workspace, model and session from the source task', asy
     await bridge.close();
     await daemon.close();
     removeDir(roRoot);
+  }
+});
+
+test('resume mounts the skill profile configured on the bridge', async () => {
+  let root = '';
+  const daemon = await stubDaemon((req) => {
+    if (req.method === TASK_STATUS) {
+      return statusReply(req, {
+        directory: root,
+        status: DONE,
+        sessionId: SESSION_ID,
+        model: MODEL,
+      });
+    }
+    return okReply(req, { id: NEW_TASK_ID });
+  });
+  root = daemon.dir;
+  const bridge = await startBridge(daemon.socket, {
+    allowDirectories: [daemon.dir],
+    allowModels: [MODEL],
+    skillProfile: 'controller',
+  });
+  try {
+    const result = await resume(bridge.url, { taskId: TASK_ID, prompt: PROMPT });
+    assert.notEqual(result.result?.isError, true);
+    const dispatch = daemon.calls.find((c) => c.method === TASK_DISPATCH);
+    assert.deepEqual(dispatch?.params.roBind, bindsUnder(bridge.skillRoot, CONTROLLER_BINDS));
+  } finally {
+    await bridge.close();
+    await daemon.close();
   }
 });
 

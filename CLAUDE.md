@@ -14,7 +14,8 @@ HTTP MCP bridge to a local TaskFerry daemon. Validated once against a local Task
 - `src/listen.ts`: Unix socket and loopback TCP listeners, including socket permissions and stale-socket replacement.
 - `src/config.ts`: flag/env/config-file precedence, defaults, and token resolution.
 - `src/tools.ts`: the seven core tools, their strict schemas, and the dispatch allowlist checks.
-- `src/tools-shared.ts`: shared tool scope, annotations, and task-status helpers.
+- `src/tools-shared.ts`: shared tool scope, annotations, task-status helpers, and profile-aware bind resolution.
+- `src/skills.ts`: the `worker` and `controller` skill profiles and their read-only bind paths.
 - `src/tools-changeset.ts`: `taskferry_accept`, `taskferry_reject`, `taskferry_cancel`.
 - `src/tools-resume.ts`: `taskferry_resume`, the session follow-up tool.
 - `src/tools-message.ts`: `taskferry_message`, the confirmed full-message reader.
