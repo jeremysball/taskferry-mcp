@@ -21,9 +21,12 @@ HTTP MCP bridge to a local TaskFerry daemon. Validated once against a local Task
 - `src/tools-worktree.ts`: `taskferry_worktree`, the scoped read-only file viewer.
 - `src/scope.ts`: allowed-root check for task directories.
 - `src/daemon.ts`: Unix socket client for the TaskFerry protocol.
+- `src/models.ts`: the `opencode models` catalog runner and its short-lived cache.
+- `src/errors.ts`: shared errno `code` reader for filesystem errors.
 - `src/gateway.ts`: loopback forwarding gateway demo.
-- `test/http.test.ts`, `test/listen.test.ts`, `test/tools.test.ts`, `test/tools-extra.test.ts`, `test/config.test.ts`: tests against a stub daemon on a Unix socket and real loopback HTTP listeners.
-- `docs/evidence/`: run logs. Do not edit them.
+- `test/http.test.ts`, `test/listen.test.ts`, `test/tools.test.ts`, `test/tools-extra.test.ts`, `test/tools-resume.test.ts`, `test/config.test.ts`: tests against a stub daemon on a Unix socket and real loopback HTTP listeners.
+- `test/helpers.ts`: the stub daemon, bridge launcher, and MCP call helpers those tests share.
+- `docs/evidence/`: verbatim historical run logs. Do not edit them; `docs/evidence/README.md` explains what they are and which branch and commit each came from.
 
 ## Rules specific to this repo
 
