@@ -21,6 +21,23 @@ proxy in front.
 **Becomes a bug if:** a bind-address option lets TCP mode bind a non-loopback
 address, or the Host/Origin check is removed.
 
+## The gateway returns one buffered JSON body, not an event stream
+
+**Observe:** a client that asks for `text/event-stream`, or that waits for
+progress notifications during a long tool call, receives nothing until the
+upstream call finishes, then a single JSON body.
+
+**Why:** `src/gateway.ts` is a request/response bridge: it reads the whole
+request body, `fetch`es the upstream, awaits `upstream.text()`, and writes the
+status and content type once. It forwards the MCP session and protocol headers
+the upstream needs, but it has no path for a chunked event stream, and the
+bridge behind it answers JSON only (`enableJsonResponse: true` in
+`src/server.ts`). A deployment that needs server-initiated messages needs a
+streaming proxy, not this reference gateway.
+
+**Becomes a bug if:** a client's tool call depends on a notification that must
+arrive before the HTTP response ends.
+
 ## Dispatch returns an error until both allowlists are set
 
 **Observe:** `taskferry_dispatch` fails with "dispatch disabled until
@@ -55,13 +72,31 @@ points at a symlink or root-resolution problem, not at the intended case.
 **Why:** the daemon's own "unknown task id" error would let a caller probe
 which IDs exist outside their allowed directories. The scope guard maps the
 daemon's `UNKNOWN_TASK` code to the generic message (`inScopeStatus` in
-`src/tools.ts`, backed by `src/scope.ts`). Other daemon failures keep their own
+`src/tools-shared.ts`; the root check it calls is `inAllowedRoot` in
+`src/scope.ts`). Other daemon failures keep their own
 message so an outage is not mistaken for a permissions problem. Both are
 pinned by tests.
 
 **Becomes a bug if:** the daemon renames the `UNKNOWN_TASK` code. Unknown IDs
 then leak the daemon's wording again. The tests cannot catch that: the stub
 daemon's code is copied from the daemon's source, not read from a live one.
+
+## `taskferry_list` counts only the rows the caller can see
+
+**Observe:** `taskferry_list` without a directory reports `counts` that add up
+to fewer tasks than the daemon holds, and the missing ones are absent from
+`tasks` too.
+
+**Why:** `visibleList` in `src/tools.ts` filters the daemon's rows through the
+workspace allowlist (`isVisibleRow`) before `countStatuses` runs, so `counts`
+and `tasks` describe the same visible set. Counting foreign rows would disclose
+how many tasks exist in workspaces the bridge is not configured for, which is
+the existence leak the scope guard refuses everywhere else. The daemon's 500-row
+cap applies before the filter, so the `note` field reports when older rows may
+be missing.
+
+**Becomes a bug if:** `counts` disagrees with the `tasks` array, or a count
+reveals a workspace outside the allowlist.
 
 ## Tool failures come back as HTTP 200
 
@@ -123,6 +158,24 @@ it there some other way.
 **Becomes a bug if:** the daemon starts accepting `source:destination` pairs
 and the bridge still refuses or drops them.
 
+## A newly enabled model is missing for up to a minute
+
+**Observe:** a model installed or enabled in OpenCode just now does not appear
+in `taskferry_models`, and a dispatch naming it is refused as not allowed,
+although `opencode models` lists it.
+
+**Why:** `listOpencodeModels` caches the catalog for 60 seconds (`CACHE_TTL_MS`
+in `src/models.ts`) and a bridge process is long-lived. The cache is per
+process, so a restart clears it immediately.
+`TASKFERRY_MCP_MODELS_CACHE_TTL_MS` (flag `--models-cache-ttl-ms`, config key
+`modelsCacheTtlMs`, see the README) lowers the window for a host whose catalog
+changes often. `missingAllowedModels` comes from the same cached read, so it
+reports the same staleness.
+
+**Becomes a bug if:** the model is still missing after the TTL expires and the
+bridge has been restarted. That points at the allowlist or the catalog command,
+not at the cache.
+
 ## `taskferry_message` withholds the full message until `confirm: true`
 
 **Observe:** calling `taskferry_message` with only a `taskId` returns
@@ -138,6 +191,21 @@ about the dedicated read path, not a security boundary.
 
 **Becomes a bug if:** the preview is empty for a non-empty message, or
 `confirm: true` still truncates without reporting `truncated` and `nextOffset`.
+
+## `taskferry_message` pages after the daemon sends the whole field
+
+**Observe:** a confirmed page of a large message with `offset` and `limit`
+still makes the daemon send the entire message over its socket; only the text
+that reaches the client is trimmed.
+
+**Why:** the daemon's `task.result` has no byte-range parameter, so the bridge
+asks for `fields: ["message"]` and slices the string itself
+(`src/tools-message.ts`). Paging bounds the client's context and the MCP
+response size, not the daemon read. `taskferry_result` with
+`fields: ["message"]` has the same property.
+
+**Becomes a bug if:** the daemon gains a range or streaming parameter and the
+bridge keeps pulling the whole field.
 
 ## `taskferry_worktree` refuses a symlink that points outside the task
 
@@ -175,7 +243,27 @@ caller's context. Paging with `offset` and `maxBytes` reads the rest; the 1 MiB
 hard cap bounds a single response.
 
 **Becomes a bug if:** a file smaller than `maxBytes` comes back truncated, or
-the reported `nextOffset` skips bytes.
+`offset` plus the reported `bytesRead` skips bytes. A worktree file page has no
+`nextOffset`: the caller advances `offset` by `bytesRead`. Directory listings
+are not byte slices at all; they cap at 500 entries and report `truncated`.
+
+## Message pages count characters; worktree pages count bytes
+
+**Observe:** `nextOffset` from `taskferry_message` advances by characters
+(UTF-16 code units), while a worktree file read pages by `offset` and
+`maxBytes` and reports `bytesRead`; the same number means different things in
+the two tools.
+
+**Why:** the message path is a text preview and slices the decoded string
+(`message.slice(offset, end)` in `src/tools-message.ts`), so a caller paging
+text never splits a character. The worktree path is a file slice
+(`readSync(fd, buffer, 0, length, start)` in `src/tools-worktree.ts`) and never
+decodes the rest of the file, so byte offsets are the only useful unit. A
+worktree directory listing is not paged at all: it caps at 500 entries and
+reports `truncated`, so there is no offset to continue from.
+
+**Becomes a bug if:** one tool starts reporting the other's unit under the same
+field name.
 
 ## Resume refuses a running source task
 

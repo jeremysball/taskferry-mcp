@@ -24,7 +24,10 @@ export function registerChangesetTools(server: McpServer, scope: ToolScope) {
     },
     async ({ taskId }) => {
       await inScopeStatus(taskId, scope);
-      return asText(await callDaemon(scope.daemonSocket, 'task.accept', { taskId }));
+      // Outlast the gate's two 5s waits: graceful termination, then forced-kill cleanup.
+      return asText(
+        await callDaemon(scope, 'task.accept', { taskId }, scope.limits.daemonTimeoutMs * 6),
+      );
     },
   );
 
@@ -38,7 +41,10 @@ export function registerChangesetTools(server: McpServer, scope: ToolScope) {
     },
     async ({ taskId }) => {
       await inScopeStatus(taskId, scope);
-      return asText(await callDaemon(scope.daemonSocket, 'task.reject', { taskId }));
+      // Outlast the gate's two 5s waits: graceful termination, then forced-kill cleanup.
+      return asText(
+        await callDaemon(scope, 'task.reject', { taskId }, scope.limits.daemonTimeoutMs * 6),
+      );
     },
   );
 
@@ -53,7 +59,7 @@ export function registerChangesetTools(server: McpServer, scope: ToolScope) {
     async ({ taskId, graceMs }) => {
       await inScopeStatus(taskId, scope);
       return asText(
-        await callDaemon(scope.daemonSocket, 'task.cancel', {
+        await callDaemon(scope, 'task.cancel', {
           taskId,
           ...(graceMs === undefined ? {} : { graceMs }),
         }),
