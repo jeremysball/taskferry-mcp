@@ -8,28 +8,30 @@ import path from 'node:path';
 import { chmodSync, existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
 import { createBridge } from '../src/server.ts';
 import { listenBridge } from '../src/listen.ts';
-import { HEALTH, call, removeDir, stubDaemon, tempDir, toolCall, okReply } from './helpers.ts';
+import {
+  HEALTH,
+  bridgeConfig,
+  call,
+  removeDir,
+  stubDaemon,
+  tempDir,
+  toolCall,
+  okReply,
+} from './helpers.ts';
 
 // The URL only supplies the request path; the connection dials the unix socket.
 // eslint-disable-next-line sonarjs/no-clear-text-protocols
 const SOCKET_URL = 'http://tunnel.invalid/mcp';
 const LISTEN_DIR = 'tf-listen-';
 
-const config = (daemonSocket: string, listenPath: string) => ({
-  daemonSocket,
-  token: 'correct-secret',
-  allowDirectories: [],
-  allowModels: [],
-  allowRoBinds: [],
-  skillProfile: 'worker' as const,
-  listen: { kind: 'unix' as const, path: listenPath },
-});
+const unixConfig = (daemonSocket: string, listenPath: string) =>
+  bridgeConfig({ daemonSocket, listen: { kind: 'unix', path: listenPath } });
 
 test('the unix listener serves MCP on a socket only its owner can use', async () => {
   const daemon = await stubDaemon((req) => okReply(req, { healthy: true }));
   const dir = tempDir(LISTEN_DIR);
   const listenPath = path.join(dir, 'run', 'mcp.sock');
-  const server = createBridge(config(daemon.socket, listenPath));
+  const server = createBridge(unixConfig(daemon.socket, listenPath));
   const listener = await listenBridge(server, { kind: 'unix', path: listenPath });
   try {
     assert.equal(statSync(listenPath).mode & 0o777, 0o600);
@@ -52,7 +54,7 @@ test('an existing listen directory keeps its mode', async () => {
   mkdirSync(shared, { mode: 0o755 });
   chmodSync(shared, 0o755);
   const listenPath = path.join(shared, 'mcp.sock');
-  const listener = await listenBridge(createBridge(config('/none', listenPath)), {
+  const listener = await listenBridge(createBridge(unixConfig('/none', listenPath)), {
     kind: 'unix',
     path: listenPath,
   });
@@ -67,7 +69,7 @@ test('an existing listen directory keeps its mode', async () => {
 test('stopping the listener removes its socket file', async () => {
   const dir = tempDir(LISTEN_DIR);
   const listenPath = path.join(dir, 'mcp.sock');
-  const server = createBridge(config(path.join(dir, 'none.sock'), listenPath));
+  const server = createBridge(unixConfig(path.join(dir, 'none.sock'), listenPath));
   const listener = await listenBridge(server, { kind: 'unix', path: listenPath });
   try {
     assert.equal(existsSync(listenPath), true);
@@ -99,7 +101,7 @@ test('a stale socket file left by a crash is replaced', async () => {
   const listenPath = path.join(dir, 'mcp.sock');
   await leaveStaleSocket(listenPath);
   assert.equal(statSync(listenPath).isSocket(), true, 'the fixture must leave a stale socket');
-  const listener = await listenBridge(createBridge(config('/none', listenPath)), {
+  const listener = await listenBridge(createBridge(unixConfig('/none', listenPath)), {
     kind: 'unix',
     path: listenPath,
   });
@@ -115,13 +117,16 @@ test('a stale socket file left by a crash is replaced', async () => {
 test('a live instance already on the socket is never displaced', async () => {
   const dir = tempDir(LISTEN_DIR);
   const listenPath = path.join(dir, 'mcp.sock');
-  const first = await listenBridge(createBridge(config('/none', listenPath)), {
+  const first = await listenBridge(createBridge(unixConfig('/none', listenPath)), {
     kind: 'unix',
     path: listenPath,
   });
   try {
     await assert.rejects(
-      listenBridge(createBridge(config('/none', listenPath)), { kind: 'unix', path: listenPath }),
+      listenBridge(createBridge(unixConfig('/none', listenPath)), {
+        kind: 'unix',
+        path: listenPath,
+      }),
       /already in use/,
     );
     assert.equal(existsSync(listenPath), true, 'the running instance must keep its socket');
@@ -137,7 +142,10 @@ test('a regular file at the socket path is refused, not deleted', async () => {
   writeFileSync(listenPath, 'precious');
   try {
     await assert.rejects(
-      listenBridge(createBridge(config('/none', listenPath)), { kind: 'unix', path: listenPath }),
+      listenBridge(createBridge(unixConfig('/none', listenPath)), {
+        kind: 'unix',
+        path: listenPath,
+      }),
       /not a socket/,
     );
     assert.equal(existsSync(listenPath), true);
@@ -147,7 +155,7 @@ test('a regular file at the socket path is refused, not deleted', async () => {
 });
 
 test('the tcp listener binds loopback only', async () => {
-  const server = createBridge({ ...config('/none', ''), listen: { kind: 'tcp', port: 0 } });
+  const server = createBridge({ ...unixConfig('/none', ''), listen: { kind: 'tcp', port: 0 } });
   const listener = await listenBridge(server, { kind: 'tcp', port: 0 });
   try {
     assert.equal((server.address() as net.AddressInfo).address, '127.0.0.1');

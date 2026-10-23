@@ -158,21 +158,28 @@ it there some other way.
 **Becomes a bug if:** the daemon starts accepting `source:destination` pairs
 and the bridge still refuses or drops them.
 
-## Skill-profile binds bypass the caller `roBind` allowlist
+## Skill-profile and server binds bypass the caller `roBind` allowlist
 
-**Observe:** `taskferry_dispatch` mounts `~/.claude/skills/...` even when
-`allowedRoBinds` is empty, while a caller-supplied `roBind` is refused in the
-same configuration.
+**Observe:** `taskferry_dispatch` and `taskferry_resume` mount `~/.claude/skills/...`
+even when `allowedRoBinds` is empty, while a caller-supplied `roBind` is refused in
+the same configuration. With the default skill root the daemon also logs a
+deny-list-override warning on every launch, because `~/.claude` is on its sandbox deny
+list.
 
-**Why:** skill-profile paths are server constants compiled into
-`src/skills.ts`, not caller input. The allowlist exists to constrain what a
-caller can request, so the profile's fixed paths do not go through it. A
-caller-supplied `roBind` still must pass `resolveRoBinds` and the configured
-allowlist.
+**Why:** profile paths are derived at runtime from the operator-configured
+`skillRoot` (default `~/.claude`) and `serverRoBinds`, not from caller input. The
+allowlist exists to constrain what a caller can request, so these server-owned paths
+skip it. They still go through the same resolver as caller paths: absolute check,
+`realpath`, and an existence check, so a missing root fails the dispatch instead of
+silently mounting less. A caller-supplied `roBind` still must pass `resolveRoBinds`
+and the configured allowlist. The deny-list warning is deliberate: the operator asked
+for a read-only view of a masked directory, and the daemon says so rather than
+silently dropping the mount.
 
-**Becomes a bug if:** a path derived from a tool argument reaches the daemon
-without the allowlist check, or changing `skillProfile` lets a caller choose
-the mounted directories.
+**Becomes a bug if:** a path derived from a tool argument reaches the daemon without
+the allowlist check, changing `skillProfile` lets a caller choose the mounted
+directories, or a missing server-owned root is silently dropped instead of failing
+the dispatch.
 
 ## A newly enabled model is missing for up to a minute
 

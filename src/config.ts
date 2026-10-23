@@ -3,7 +3,7 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
 import { errorCode } from './errors.ts';
-import { isSkillProfile, SKILL_PROFILES, type SkillProfile } from './skills.ts';
+import { isSkillProfile, defaultSkillRoot, SKILL_PROFILES, type SkillProfile } from './skills.ts';
 
 export type Listen = { kind: 'unix'; path: string } | { kind: 'tcp'; port: number };
 
@@ -22,6 +22,8 @@ export type BridgeConfig = {
   allowModels: string[];
   allowRoBinds: string[];
   skillProfile: SkillProfile;
+  skillRoot: string;
+  serverRoBinds: string[];
   listen: Listen;
 } & Partial<BridgeLimits>;
 
@@ -45,6 +47,8 @@ const FLAGS = {
   'allowed-models': { type: 'string' },
   'allowed-ro-binds': { type: 'string' },
   'skill-profile': { type: 'string' },
+  'skill-root': { type: 'string' },
+  'server-ro-binds': { type: 'string' },
   'listen-socket': { type: 'string' },
   'listen-port': { type: 'string' },
   'token-file': { type: 'string' },
@@ -60,6 +64,8 @@ const FILE_KEYS = [
   'allowedModels',
   'allowedRoBinds',
   'skillProfile',
+  'skillRoot',
+  'serverRoBinds',
   'listenSocket',
   'listenPort',
   'tokenFile',
@@ -156,7 +162,9 @@ function asBindRoots(name: string, value: unknown): string[] {
 
 function asSkillProfile(name: string, value: unknown): SkillProfile {
   if (!isSkillProfile(value)) {
-    throw new ConfigError(`${name} must be one of ${SKILL_PROFILES.join(', ')}`);
+    throw new ConfigError(
+      `${name} must be one of ${SKILL_PROFILES.join(', ')}, got ${JSON.stringify(value)}`,
+    );
   }
   return value;
 }
@@ -289,6 +297,16 @@ export function resolveConfig({
     fromEnv(env, 'TASKFERRY_MCP_SKILL_PROFILE'),
     file.skillProfile,
   );
+  const skillRoot = firstFound<unknown>(
+    flags['skill-root'],
+    fromEnv(env, 'TASKFERRY_MCP_SKILL_ROOT'),
+    file.skillRoot,
+  );
+  const serverRoBinds = firstFound<unknown>(
+    flags['server-ro-binds'],
+    fromEnv(env, 'TASKFERRY_MCP_SERVER_RO_BINDS'),
+    file.serverRoBinds,
+  );
   const tokenFile = firstFound<unknown>(
     flags['token-file'],
     fromEnv(env, 'TASKFERRY_MCP_TOKEN_FILE'),
@@ -307,6 +325,10 @@ export function resolveConfig({
     allowModels: models ? asList('allowed models', models.value, ',') : [],
     allowRoBinds: roBinds ? asBindRoots('allowed read-only binds', roBinds.value) : [],
     skillProfile: skillProfile ? asSkillProfile('skill profile', skillProfile.value) : 'worker',
+    skillRoot: skillRoot
+      ? absolute('skill root', asString('skill root', skillRoot.value))
+      : defaultSkillRoot(),
+    serverRoBinds: serverRoBinds ? asBindRoots('server read-only binds', serverRoBinds.value) : [],
     listen: resolveListen(flags, env, file),
   };
 }
