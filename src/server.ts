@@ -6,6 +6,7 @@ import { resolveConfig, type BridgeConfig } from './config.ts';
 import { listenBridge } from './listen.ts';
 import { registerChangesetTools } from './tools-changeset.ts';
 import { registerMessageTool } from './tools-message.ts';
+import { registerResumeTool } from './tools-resume.ts';
 import { registerTools, type ToolDeps } from './tools.ts';
 import { registerWorktreeTool } from './tools-worktree.ts';
 
@@ -18,6 +19,7 @@ taskferry_result accepts fields to select result fields and full to return the c
 taskferry_message reads a task final message without truncation: without confirm it returns only the length and a short preview; call again with confirm: true, using offset and limit to page a long message.
 taskferry_accept applies a pending changeset to its workspace; taskferry_reject refuses and discards it; taskferry_cancel stops a queued or running task. All three are scope-guarded and write-capable.
 taskferry_worktree lists or reads files inside a task dispatch directory, read-only, with paths confined to that directory.
+taskferry_resume continues a settled task's conversation: pass its taskId and a prompt, and the bridge reuses that task's workspace, model and session. It refuses a queued or running task, or one without a session.
 taskferry_dispatch accepts variant to set the model reasoning level; omit it for the TaskFerry default.
 roBind is optional: it exposes host files or directories read-only inside the task sandbox, and each requested path must already be on the bridge read-only bind allowlist. Use it for credentials or shared config, never for broad filesystem access.
 Dispatch has no idempotency key, so do not retry an ambiguous dispatch automatically.`;
@@ -99,6 +101,7 @@ async function serveMcp(
   registerChangesetTools(server, scope);
   registerWorktreeTool(server, scope);
   registerMessageTool(server, scope);
+  registerResumeTool(server, scope);
   const transport = new NodeStreamableHTTPServerTransport({
     enableJsonResponse: true,
     maxRequestBodySize: MAX_REQUEST_BYTES,

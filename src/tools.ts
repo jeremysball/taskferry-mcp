@@ -1,5 +1,4 @@
 import { realpathSync } from 'node:fs';
-import path from 'node:path';
 import { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import { callDaemon, type Json } from './daemon.ts';
@@ -10,8 +9,10 @@ import {
   READ_ONLY,
   WRITES,
   asText,
+  assertAllowedModel,
   inScopeStatus,
   nonBlank,
+  resolveRoBinds,
   type ToolDeps,
   type ToolScope,
 } from './tools-shared.ts';
@@ -174,28 +175,6 @@ async function summarize(args: SummaryArgs, scope: ToolScope) {
   });
 }
 
-// Resolve each requested read-only bind against the bridge allowlist. Resolving symlinks before
-// the check keeps a link from smuggling in a target the allowlist never named.
-function resolveRoBinds(requested: readonly string[] | undefined, scope: ToolScope) {
-  if (requested === undefined || requested.length === 0) return [];
-  if (!scope.allowRoBinds.length) {
-    throw new Error('read-only bind disabled until allowlist configured');
-  }
-  const resolved = new Set<string>();
-  for (const requestedPath of requested) {
-    if (!path.isAbsolute(requestedPath)) throw new Error('bind path must be absolute');
-    let real: string;
-    try {
-      real = realpathSync(requestedPath);
-    } catch {
-      throw new Error('bind path unavailable');
-    }
-    if (!inAllowedRoot(scope.allowRoBinds, real)) throw new Error('read-only bind denied');
-    resolved.add(real);
-  }
-  return [...resolved];
-}
-
 type DispatchArgs = {
   directory: string;
   model: string;
@@ -220,17 +199,6 @@ function resolveDispatchDirectory(directory: string, scope: ToolScope) {
     );
   }
   return real;
-}
-
-function assertAllowedModel(model: string, scope: ToolScope) {
-  if (!scope.allowModels.length) {
-    throw new Error('dispatch disabled: model allowlist is empty');
-  }
-  if (!scope.allowModels.includes(model)) {
-    throw new Error(
-      `model denied: ${model} is not allowed; allowed models: ${scope.allowModels.join(', ')}`,
-    );
-  }
 }
 
 async function dispatchTask(args: DispatchArgs, scope: ToolScope) {

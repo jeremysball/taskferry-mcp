@@ -16,6 +16,7 @@ HTTP MCP bridge to a local TaskFerry daemon. Validated once against a local Task
 - `src/tools.ts`: the seven core tools, their strict schemas, and the dispatch allowlist checks.
 - `src/tools-shared.ts`: shared tool scope, annotations, and task-status helpers.
 - `src/tools-changeset.ts`: `taskferry_accept`, `taskferry_reject`, `taskferry_cancel`.
+- `src/tools-resume.ts`: `taskferry_resume`, the session follow-up tool.
 - `src/tools-message.ts`: `taskferry_message`, the confirmed full-message reader.
 - `src/tools-worktree.ts`: `taskferry_worktree`, the scoped read-only file viewer.
 - `src/scope.ts`: allowed-root check for task directories.

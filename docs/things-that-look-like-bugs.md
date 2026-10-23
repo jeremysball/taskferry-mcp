@@ -176,3 +176,15 @@ hard cap bounds a single response.
 
 **Becomes a bug if:** a file smaller than `maxBytes` comes back truncated, or
 the reported `nextOffset` skips bytes.
+
+## Resume refuses a running source task
+
+**Observe:** `taskferry_resume` fails with "task is still running" even though
+TaskFerry's CLI accepts `--session-id` for a task that has not settled.
+
+**Why:** resuming a live session would put two workers on one conversation, and
+the source task's overlay is still open. The bridge waits for a settled source
+task. The daemon CLI stays permissive for host-side use.
+
+**Becomes a bug if:** a settled task is refused, or a resume is blocked after
+the source task has ended but before its record updates.

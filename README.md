@@ -10,7 +10,7 @@ The bridge is TypeScript run directly by Node's native type stripping, so there 
 
 ## Tools
 
-Twelve tools. Ten are hard-wired to one daemon method; `taskferry_models`
+Thirteen tools. Eleven are hard-wired to one daemon method; `taskferry_models`
 runs the local `opencode models` command, and `taskferry_worktree` reads the
 task's dispatch directory locally. A caller cannot name a daemon method
 directly.
@@ -25,6 +25,7 @@ directly.
 | `taskferry_message`  | `task.result`     | Scope-guarded; final message, preview until `confirm: true` |
 | `taskferry_summary`  | `task.summary`    | Scope-guarded; queues a summary task                        |
 | `taskferry_dispatch` | `task.dispatch`   | Needs both allowlists; optional `variant` and `roBind`      |
+| `taskferry_resume`   | `task.dispatch`   | Continues a settled task's session; derives workspace/model |
 | `taskferry_accept`   | `task.accept`     | Scope-guarded; applies a pending changeset                  |
 | `taskferry_reject`   | `task.reject`     | Scope-guarded; refuses and discards a pending changeset     |
 | `taskferry_cancel`   | `task.cancel`     | Scope-guarded; optional `graceMs`                           |
@@ -32,7 +33,7 @@ directly.
 
 ## Run tests
 
-`mise run check` runs the full gate: format check, lint, the TypeScript split check, `tsc --noEmit`, and 48 unit tests. CI runs the same steps. `npm test` runs only the tests.
+`mise run check` runs the full gate: format check, lint, the TypeScript split check, `tsc --noEmit`, and 52 unit tests. CI runs the same steps. `npm test` runs only the tests.
 
 The tests start a real stub daemon on a Unix socket and real HTTP listeners on loopback. Two mutation probes are kept in the evidence directory: disabling the scope guard fails the cross-workspace test, and loosening the socket mode fails the permissions test.
 
@@ -100,6 +101,15 @@ An unknown task ID and an out-of-scope one both answer "task not accessible", wh
 
 `taskferry_dispatch` also accepts an optional `roBind` array of absolute host paths. Each path is resolved with `realpathSync` and must be on the read-only bind allowlist, either as the exact file or under an allowed directory. The bridge forwards the resolved paths to the daemon as `roBind`, which mounts each one read-only at the same path inside the task sandbox. There is no read-write bind surface.
 
+## Resume
+
+`taskferry_resume` takes a settled task id and a follow-up prompt, then queues a
+new task in that task's existing session. The workspace, model and session id
+come from the source task, not from the caller, so a resume cannot move a
+session into a workspace or model the bridge would not have allowed directly.
+The source task must have a session and must not be queued or running. Accepts
+the same optional `variant` and `roBind` arguments as dispatch.
+
 ## Changesets
 
 `taskferry_accept` applies a task's pending changeset to its workspace.
@@ -136,9 +146,9 @@ walk the full message without confirming.
 
 ## Limitations / next gates
 
-- Real TaskFerry integration live passes cover health, list, status, result, message, worktree, summary, dispatch, and dispatched-task results. Changeset accept/reject and cancel are unit-tested against the stub only, because a live call would mutate a real workspace. Queue behavior under load, concurrent clients, non-default executors, and very long summaries are still untested. Dispatch stays disabled until both allowlists are set, and read-only binds stay disabled until the bind allowlist is set.
+- Real TaskFerry integration live passes cover health, list, status, result, message, worktree, summary, dispatch, and dispatched-task results. Changeset accept/reject and cancel are unit-tested against the stub only, because a live call would mutate a real workspace. Resume is covered by unit tests; a live resume pass is not yet recorded. Queue behavior under load, concurrent clients, non-default executors, and very long summaries are still untested. Dispatch stays disabled until both allowlists are set, and read-only binds stay disabled until the bind allowlist is set.
 - MCP compatibility is verified against the official SDK client and raw JSON-RPC over HTTP. The bridge answers with JSON only, so a client that requires SSE or sessions will fail.
-- The suite has 48 cases and does not cover the B01-B18 matrix from the design plan, which is not in this repo.
+- The suite has 52 cases and does not cover the B01-B18 matrix from the design plan, which is not in this repo.
 - Dispatch has no durable idempotency. Do not retry an ambiguous failure automatically.
 - `gateway.ts` is a Node.js prototype. A Sites-native handler and a real deployment need the Sites runtime and API.
 - Validate input schemas, HTTP limits, authentication, dispatch restrictions, CSRF and origin posture, audit logging, secret rotation, and response truncation before production.

@@ -44,6 +44,7 @@ test('initialize, discovery and daemon mapping, including fragmented socket resp
       'taskferry_models',
       'taskferry_reject',
       'taskferry_result',
+      'taskferry_resume',
       'taskferry_status',
       'taskferry_summary',
       'taskferry_worktree',
@@ -64,12 +65,13 @@ test('every tool schema is strict, and only the write tools are not read-only', 
   const f = await fixture();
   try {
     const tools = (await call(f.url, rpc('tools/list'))).result?.tools ?? [];
-    assert.equal(tools.length, 12);
+    assert.equal(tools.length, 13);
     const writes = new Set([
       'taskferry_accept',
       'taskferry_cancel',
       'taskferry_dispatch',
       'taskferry_reject',
+      'taskferry_resume',
       'taskferry_summary',
     ]);
     for (const tool of tools) {
@@ -104,7 +106,7 @@ test('the official SDK client can connect, list tools and call one', async () =>
         requestInit: { headers: { authorization: `Bearer ${TOKEN}` } },
       }),
     );
-    assert.equal((await client.listTools()).tools.length, 12);
+    assert.equal((await client.listTools()).tools.length, 13);
     const result = await client.callTool({ name: HEALTH, arguments: {} });
     assert.notEqual(result.isError, true);
     assert.deepEqual(result.content, [{ type: 'text', text: JSON.stringify({ healthy: true }) }]);
