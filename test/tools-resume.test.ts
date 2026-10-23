@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync } from 'node:fs';
+import { skillBindPaths } from '../src/skills.ts';
 import {
   TASK_STATUS,
   type Call,
@@ -80,7 +81,7 @@ test('resume derives the workspace, model and session from the source task', asy
             prompt: PROMPT,
             sessionId: SESSION_ID,
             variant: 'high',
-            roBind: [credential],
+            roBind: [...skillBindPaths('worker'), credential],
           },
         ],
       ],

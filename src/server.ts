@@ -23,6 +23,7 @@ taskferry_worktree lists or reads files inside a task dispatch directory, read-o
 taskferry_resume continues a settled task's conversation: pass its taskId and a prompt, and the bridge reuses that task's workspace, model and session. It refuses a queued or running task, or one without a session.
 taskferry_dispatch accepts variant to set the model reasoning level; omit it for the TaskFerry default.
 roBind is optional: it exposes host files or directories read-only inside the task sandbox, and each requested path must already be on the bridge read-only bind allowlist. Use it for credentials or shared config, never for broad filesystem access.
+The server skill profile mounts skills automatically: worker gets the default skills, controller gets every skill root.
 Dispatch has no idempotency key, so do not retry an ambiguous dispatch automatically.`;
 
 // One MCP server and transport per request. The transport is stateless (no session ID), and JSON

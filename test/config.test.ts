@@ -48,6 +48,7 @@ test('defaults: the daemon socket and the listener both live in the XDG runtime 
   assert.deepEqual(c.allowDirectories, []);
   assert.deepEqual(c.allowModels, []);
   assert.deepEqual(c.allowRoBinds, []);
+  assert.equal(c.skillProfile, 'worker');
   assert.equal(c.token, 'secret');
 });
 
@@ -68,6 +69,7 @@ test('precedence is flag over env over config key over default, for every knob',
       allowedDirectories: ['/file-a', '/file-b'],
       allowedModels: ['file-model'],
       allowedRoBinds: ['/file-bind'],
+      skillProfile: 'controller',
       listenSocket: '/from/file-listen.sock',
     });
     const fromFile = resolve(['--config', file]);
@@ -84,6 +86,7 @@ test('precedence is flag over env over config key over default, for every knob',
     assert.deepEqual(fromFile.allowDirectories, ['/file-a', '/file-b']);
     assert.deepEqual(fromFile.allowModels, ['file-model']);
     assert.deepEqual(fromFile.allowRoBinds, ['/file-bind']);
+    assert.equal(fromFile.skillProfile, 'controller');
     assert.deepEqual(fromFile.listen, { kind: 'unix', path: '/from/file-listen.sock' });
 
     const env = {
@@ -95,6 +98,7 @@ test('precedence is flag over env over config key over default, for every knob',
       TASKFERRY_ALLOWED_DIRECTORIES: '/env-a:/env-b',
       TASKFERRY_ALLOWED_MODELS: 'env-1,env-2',
       TASKFERRY_ALLOWED_RO_BINDS: '/env-bind',
+      TASKFERRY_MCP_SKILL_PROFILE: 'worker',
       TASKFERRY_MCP_LISTEN_SOCKET: '/from/env-listen.sock',
     };
     const fromEnv = resolve(['--config', file], env);
@@ -111,6 +115,7 @@ test('precedence is flag over env over config key over default, for every knob',
     assert.deepEqual(fromEnv.allowDirectories, ['/env-a', '/env-b']);
     assert.deepEqual(fromEnv.allowModels, ['env-1', 'env-2']);
     assert.deepEqual(fromEnv.allowRoBinds, ['/env-bind']);
+    assert.equal(fromEnv.skillProfile, 'worker');
     assert.deepEqual(fromEnv.listen, { kind: 'unix', path: '/from/env-listen.sock' });
 
     const fromFlag = resolve(
@@ -133,6 +138,8 @@ test('precedence is flag over env over config key over default, for every knob',
         'flag-1',
         '--allowed-ro-binds',
         '/flag-bind',
+        '--skill-profile',
+        'controller',
         '--listen-socket',
         '/from/flag-listen.sock',
       ],
@@ -151,6 +158,7 @@ test('precedence is flag over env over config key over default, for every knob',
     assert.deepEqual(fromFlag.allowDirectories, ['/flag-a']);
     assert.deepEqual(fromFlag.allowModels, ['flag-1']);
     assert.deepEqual(fromFlag.allowRoBinds, ['/flag-bind']);
+    assert.equal(fromFlag.skillProfile, 'controller');
     assert.deepEqual(fromFlag.listen, { kind: 'unix', path: '/from/flag-listen.sock' });
   });
 });
@@ -257,6 +265,11 @@ test('read-only bind roots must be absolute and cannot be the filesystem root', 
     /must be an absolute path/,
   );
   assert.throws(() => resolve([], { TASKFERRY_ALLOWED_RO_BINDS: '/' }), /filesystem root/);
+});
+
+test('an unknown skill profile is refused instead of falling back to worker', () => {
+  assert.throws(() => resolve([], { TASKFERRY_MCP_SKILL_PROFILE: 'admin' }), /skill profile/);
+  assert.throws(() => resolve(['--skill-profile', '']), /skill profile/);
 });
 
 test('bad values fail loudly instead of falling back to a default', () => {

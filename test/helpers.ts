@@ -104,6 +104,7 @@ export async function startBridge(
       allowDirectories: [],
       allowModels: [],
       allowRoBinds: [],
+      skillProfile: 'worker',
       listen: { kind: 'tcp', port: 0 },
       ...DEFAULT_LIMITS,
       ...overrides,

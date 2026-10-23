@@ -5,6 +5,7 @@ import path from 'node:path';
 import fsPromises from 'node:fs/promises';
 import { syncBuiltinESMExports } from 'node:module';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
+import { skillBindPaths } from '../src/skills.ts';
 import {
   HEALTH,
   STATUS_TOOL,
@@ -276,19 +277,44 @@ test('read-only binds are allowlisted, resolved and forwarded only when requeste
     const allowed = await dispatch([allowedFile, settings]);
     assert.notEqual(allowed.result?.isError, true);
     assert.equal(daemon.calls.length, 1);
-    assert.deepEqual(daemon.calls[0]?.params.roBind, [realAllowedFile, realpathSync(settings)]);
+    assert.deepEqual(daemon.calls[0]?.params.roBind, [
+      ...skillBindPaths('worker'),
+      realAllowedFile,
+      realpathSync(settings),
+    ]);
 
     const withoutBind = await call(
       bridge.url,
       toolCall('taskferry_dispatch', { directory: daemon.dir, prompt: 'hi', model }),
     );
     assert.notEqual(withoutBind.result?.isError, true);
-    assert.equal(daemon.calls[1]?.params.roBind, undefined);
+    assert.deepEqual(daemon.calls[1]?.params.roBind, skillBindPaths('worker'));
   } finally {
     await bridge.close();
     await daemon.close();
     removeDir(allowedDir);
     removeDir(outsideDir);
+  }
+});
+
+test('the controller skill profile mounts every skill root', async () => {
+  const daemon = await stubDaemon((req) => okReply(req, { id: 'new-task' }));
+  const model = 'good';
+  const bridge = await startBridge(daemon.socket, {
+    allowDirectories: [daemon.dir],
+    allowModels: [model],
+    skillProfile: 'controller',
+  });
+  try {
+    const res = await call(
+      bridge.url,
+      toolCall('taskferry_dispatch', { directory: daemon.dir, prompt: 'hi', model }),
+    );
+    assert.notEqual(res.result?.isError, true);
+    assert.deepEqual(daemon.calls[0]?.params.roBind, skillBindPaths('controller'));
+  } finally {
+    await bridge.close();
+    await daemon.close();
   }
 });
 

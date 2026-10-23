@@ -58,6 +58,7 @@ Each setting resolves as flag, then environment variable, then config-file key, 
 | `--allowed-directories` | `TASKFERRY_ALLOWED_DIRECTORIES`     | `allowedDirectories` | none                                      |
 | `--allowed-models`      | `TASKFERRY_ALLOWED_MODELS`          | `allowedModels`      | none                                      |
 | `--allowed-ro-binds`    | `TASKFERRY_ALLOWED_RO_BINDS`        | `allowedRoBinds`     | none                                      |
+| `--skill-profile`       | `TASKFERRY_MCP_SKILL_PROFILE`       | `skillProfile`       | `worker`                                  |
 | `--listen-socket`       | `TASKFERRY_MCP_LISTEN_SOCKET`       | `listenSocket`       | `$XDG_RUNTIME_DIR/taskferry-mcp/mcp.sock` |
 | `--listen-port`         | `TASKFERRY_MCP_LISTEN_PORT`         | `listenPort`         | none                                      |
 | `--token-file`          | `TASKFERRY_MCP_TOKEN_FILE`          | `tokenFile`          | none                                      |
@@ -108,6 +109,15 @@ An unknown task ID and an out-of-scope one both answer "task not accessible", wh
 `taskferry_dispatch` accepts an optional `variant` string for the model reasoning level, for example `low`, `high`, `xhigh`, `max`, or `highest`; it forwards the value to the daemon as `variant` and omits it when unset. A denied request says whether the workspace or the model failed and includes the allowed models.
 
 `taskferry_dispatch` also accepts an optional `roBind` array of absolute host paths. Each path is resolved with `realpathSync` and must be on the read-only bind allowlist, either as the exact file or under an allowed directory. The bridge forwards the resolved paths to the daemon as `roBind`, which mounts each one read-only at the same path inside the task sandbox. There is no read-write bind surface.
+
+## Skill profiles
+
+`skillProfile` fixes which Claude skills every dispatch and resume mounts read-only:
+
+- `worker` (default) mounts the two default skills, `searching-the-web` and `using-chhoto`.
+- `controller` mounts all skill roots: `~/.claude/skills`, `~/.claude/fleet-skills`, and `~/.claude/plugins/cache` (needed for the fleet-skill symlinks to resolve).
+
+Profile paths are server constants, so they are mounted without the caller `roBind` allowlist. A caller-supplied `roBind` still goes through that allowlist. Set the profile with `--skill-profile`, `TASKFERRY_MCP_SKILL_PROFILE`, or `skillProfile` in the config file.
 
 ## Resume
 

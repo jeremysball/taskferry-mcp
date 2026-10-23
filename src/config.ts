@@ -3,6 +3,7 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
 import { errorCode } from './errors.ts';
+import { isSkillProfile, SKILL_PROFILES, type SkillProfile } from './skills.ts';
 
 export type Listen = { kind: 'unix'; path: string } | { kind: 'tcp'; port: number };
 
@@ -20,6 +21,7 @@ export type BridgeConfig = {
   allowDirectories: string[];
   allowModels: string[];
   allowRoBinds: string[];
+  skillProfile: SkillProfile;
   listen: Listen;
 } & Partial<BridgeLimits>;
 
@@ -42,6 +44,7 @@ const FLAGS = {
   'allowed-directories': { type: 'string' },
   'allowed-models': { type: 'string' },
   'allowed-ro-binds': { type: 'string' },
+  'skill-profile': { type: 'string' },
   'listen-socket': { type: 'string' },
   'listen-port': { type: 'string' },
   'token-file': { type: 'string' },
@@ -56,6 +59,7 @@ const FILE_KEYS = [
   'allowedDirectories',
   'allowedModels',
   'allowedRoBinds',
+  'skillProfile',
   'listenSocket',
   'listenPort',
   'tokenFile',
@@ -148,6 +152,13 @@ function asBindRoots(name: string, value: unknown): string[] {
     }
     return root;
   });
+}
+
+function asSkillProfile(name: string, value: unknown): SkillProfile {
+  if (!isSkillProfile(value)) {
+    throw new ConfigError(`${name} must be one of ${SKILL_PROFILES.join(', ')}`);
+  }
+  return value;
 }
 
 function asPort(name: string, value: unknown): number {
@@ -273,6 +284,11 @@ export function resolveConfig({
     fromEnv(env, 'TASKFERRY_ALLOWED_RO_BINDS'),
     file.allowedRoBinds,
   );
+  const skillProfile = firstFound<unknown>(
+    flags['skill-profile'],
+    fromEnv(env, 'TASKFERRY_MCP_SKILL_PROFILE'),
+    file.skillProfile,
+  );
   const tokenFile = firstFound<unknown>(
     flags['token-file'],
     fromEnv(env, 'TASKFERRY_MCP_TOKEN_FILE'),
@@ -290,6 +306,7 @@ export function resolveConfig({
       : [],
     allowModels: models ? asList('allowed models', models.value, ',') : [],
     allowRoBinds: roBinds ? asBindRoots('allowed read-only binds', roBinds.value) : [],
+    skillProfile: skillProfile ? asSkillProfile('skill profile', skillProfile.value) : 'worker',
     listen: resolveListen(flags, env, file),
   };
 }

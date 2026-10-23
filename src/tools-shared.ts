@@ -4,12 +4,14 @@ import { z } from 'zod';
 import { DaemonError, callDaemon, type Json } from './daemon.ts';
 import { inAllowedRoot, inResolvedRoot, resolveRoots } from './scope.ts';
 import { DEFAULT_LIMITS, type BridgeConfig, type BridgeLimits } from './config.ts';
+import { skillBindPaths, type SkillProfile } from './skills.ts';
 
 export type ToolScope = {
   daemonSocket: string;
   allowDirectories: readonly string[];
   allowModels: readonly string[];
   allowRoBinds: readonly string[];
+  skillProfile: SkillProfile;
   limits: BridgeLimits;
 };
 
@@ -19,6 +21,7 @@ export function buildToolScope(config: BridgeConfig): ToolScope {
     allowDirectories: config.allowDirectories,
     allowModels: config.allowModels,
     allowRoBinds: config.allowRoBinds,
+    skillProfile: config.skillProfile,
     limits: {
       daemonTimeoutMs: config.daemonTimeoutMs ?? DEFAULT_LIMITS.daemonTimeoutMs,
       listTimeoutMs: config.listTimeoutMs ?? DEFAULT_LIMITS.listTimeoutMs,
@@ -146,11 +149,23 @@ export async function readTaskResult(
   return { status: current.status, result };
 }
 
+export async function resolveDispatchRoBinds(
+  requested: readonly string[] | undefined,
+  scope: ToolScope,
+) {
+  return [
+    ...new Set([
+      ...skillBindPaths(scope.skillProfile),
+      ...(await resolveRoBinds(requested, scope)),
+    ]),
+  ];
+}
+
 export async function buildDispatchRequest(
   args: { prompt: string; variant?: string; roBind?: readonly string[] },
   scope: ToolScope,
 ) {
-  const readOnlyBinds = await resolveRoBinds(args.roBind, scope);
+  const readOnlyBinds = await resolveDispatchRoBinds(args.roBind, scope);
   return {
     prompt: args.prompt,
     ...(args.variant === undefined ? {} : { variant: args.variant }),

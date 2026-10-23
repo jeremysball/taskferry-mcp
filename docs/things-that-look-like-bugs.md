@@ -158,6 +158,22 @@ it there some other way.
 **Becomes a bug if:** the daemon starts accepting `source:destination` pairs
 and the bridge still refuses or drops them.
 
+## Skill-profile binds bypass the caller `roBind` allowlist
+
+**Observe:** `taskferry_dispatch` mounts `~/.claude/skills/...` even when
+`allowedRoBinds` is empty, while a caller-supplied `roBind` is refused in the
+same configuration.
+
+**Why:** skill-profile paths are server constants compiled into
+`src/skills.ts`, not caller input. The allowlist exists to constrain what a
+caller can request, so the profile's fixed paths do not go through it. A
+caller-supplied `roBind` still must pass `resolveRoBinds` and the configured
+allowlist.
+
+**Becomes a bug if:** a path derived from a tool argument reaches the daemon
+without the allowlist check, or changing `skillProfile` lets a caller choose
+the mounted directories.
+
 ## A newly enabled model is missing for up to a minute
 
 **Observe:** a model installed or enabled in OpenCode just now does not appear

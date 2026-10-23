@@ -21,6 +21,7 @@ const config = (daemonSocket: string, listenPath: string) => ({
   allowDirectories: [],
   allowModels: [],
   allowRoBinds: [],
+  skillProfile: 'worker' as const,
   listen: { kind: 'unix' as const, path: listenPath },
 });
 
