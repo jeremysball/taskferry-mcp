@@ -666,6 +666,75 @@ test('malformed task lists fail closed', async () => {
   }
 });
 
+test('an empty all-workspaces task list sentinel becomes an empty array', async () => {
+  const counts = { queued: 0, running: 0, done: 0, crashed: 0, cancelled: 0, unknown: 0 };
+  const daemon = await stubDaemon((req) =>
+    okReply(req, { counts, tasks: "none found (this server process's lifetime)" }),
+  );
+  const bridge = await startBridge(daemon.socket, { allowDirectories: [daemon.dir] });
+  try {
+    const response = await call(bridge.url, toolCall('taskferry_list'));
+    assert.notEqual(response.result?.isError, true);
+    assert.deepEqual(JSON.parse(response.result?.content?.[0]?.text ?? ''), {
+      counts,
+      tasks: [],
+    });
+  } finally {
+    await bridge.close();
+    await daemon.close();
+  }
+});
+
+test('an empty scoped task list sentinel becomes an empty array', async () => {
+  const counts = { queued: 0, running: 0, done: 0, crashed: 0, cancelled: 0, unknown: 0 };
+  const daemon = await stubDaemon((req) =>
+    okReply(req, { counts, tasks: 'none found in this workspace' }),
+  );
+  const bridge = await startBridge(daemon.socket, { allowDirectories: [daemon.dir] });
+  try {
+    const response = await call(bridge.url, toolCall('taskferry_list', { directory: daemon.dir }));
+    assert.notEqual(response.result?.isError, true);
+    assert.deepEqual(JSON.parse(response.result?.content?.[0]?.text ?? ''), {
+      counts,
+      tasks: [],
+    });
+  } finally {
+    await bridge.close();
+    await daemon.close();
+  }
+});
+
+test('a multi-root list continues past an empty sentinel root', async () => {
+  const second = tempDir('tf-second-');
+  const daemon = await stubDaemon((req) =>
+    okReply(req, {
+      tasks:
+        req.params.directory === second
+          ? [{ id: 'visible', directory: second, status: 'done' }]
+          : 'none found in this workspace',
+    }),
+  );
+  const bridge = await startBridge(daemon.socket, { allowDirectories: [daemon.dir, second] });
+  try {
+    const response = await call(bridge.url, toolCall('taskferry_list'));
+    assert.notEqual(response.result?.isError, true);
+    const body = JSON.parse(response.result?.content?.[0]?.text ?? '{}');
+    assert.deepEqual(
+      body.tasks.map((row: { id: string }) => row.id),
+      ['visible'],
+    );
+    assert.equal(body.counts.done, 1);
+    assert.deepEqual(
+      daemon.calls.map((req) => req.params),
+      [{ directory: daemon.dir }, { directory: second }],
+    );
+  } finally {
+    await bridge.close();
+    await daemon.close();
+    removeDir(second);
+  }
+});
+
 test('multiple workspace lists query roots independently and deduplicate visible rows', async () => {
   const second = tempDir('tf-second-');
   const daemon = await stubDaemon((req) =>
