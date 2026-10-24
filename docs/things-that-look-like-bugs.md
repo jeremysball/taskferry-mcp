@@ -111,6 +111,22 @@ be missing.
 **Becomes a bug if:** `counts` disagrees with the `tasks` array, or a count
 reveals a workspace outside the allowlist.
 
+## An empty workspace is a string sentinel, not an empty array
+
+**Observe:** the daemon's raw `task.list` result for an allowed workspace with
+no tasks has `tasks: "none found in this workspace"`, a string. `taskferry_list`
+returns `tasks: []`.
+
+**Why:** the daemon uses the string as a CLI presentation sentinel. The bridge
+normalizes the two known sentinels (`none found in this workspace` and
+`none found (this server process's lifetime)`) to an empty array in
+`taskListResult` in `src/tools.ts`. Returning the string would violate the
+tool's array contract and make one empty allowed root break a multi-root list.
+
+**Becomes a bug if:** a new sentinel string appears and the bridge fails closed
+instead of listing the other roots, or a malformed `tasks` value is accepted as
+empty.
+
 ## Tool failures come back as HTTP 200
 
 **Observe:** a rejected tool call (bad arguments, denied directory, daemon
