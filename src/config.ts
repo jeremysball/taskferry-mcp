@@ -1,9 +1,24 @@
-import { readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
-import { errorCode } from './errors.ts';
+import {
+  FILE_KEYS,
+  absolute,
+  asPort,
+  asString,
+  firstFound,
+  fromEnv,
+  type Env,
+  type FileConfig,
+  type FileKey,
+} from './config-primitives.ts';
+import { ConfigError, errorCode } from './errors.ts';
+import { resolveGateway, type GatewayConfig } from './gateway-config.ts';
 import { isSkillProfile, defaultSkillRoot, SKILL_PROFILES, type SkillProfile } from './skills.ts';
+import { resolveToken } from './token.ts';
+
+export { ConfigError };
 
 export type Listen = { kind: 'unix'; path: string } | { kind: 'tcp'; port: number };
 
@@ -25,16 +40,9 @@ export type BridgeConfig = {
   skillRoot: string;
   serverRoBinds: string[];
   listen: Listen;
+  gateway?: GatewayConfig;
 } & Partial<BridgeLimits>;
 
-export class ConfigError extends Error {
-  constructor(message: string, options?: ErrorOptions) {
-    super(message, options);
-    this.name = 'ConfigError';
-  }
-}
-
-type Env = Record<string, string | undefined>;
 const DAEMON_SOCKET = 'daemon socket';
 const LISTEN_SOCKET = 'listen socket';
 
@@ -52,43 +60,13 @@ const FLAGS = {
   'listen-socket': { type: 'string' },
   'listen-port': { type: 'string' },
   'token-file': { type: 'string' },
+  'gateway-port': { type: 'string' },
+  'gateway-token-file': { type: 'string' },
   'daemon-timeout-ms': { type: 'string' },
   'list-timeout-ms': { type: 'string' },
   'models-cache-ttl-ms': { type: 'string' },
   'preview-chars': { type: 'string' },
 } as const;
-
-const FILE_KEYS = [
-  'daemonSocket',
-  'allowedDirectories',
-  'allowedModels',
-  'allowedRoBinds',
-  'skillProfile',
-  'skillRoot',
-  'serverRoBinds',
-  'listenSocket',
-  'listenPort',
-  'tokenFile',
-  'daemonTimeoutMs',
-  'listTimeoutMs',
-  'modelsCacheTtlMs',
-  'previewChars',
-] as const;
-type FileKey = (typeof FILE_KEYS)[number];
-type FileConfig = Partial<Record<FileKey, unknown>>;
-
-// A resolved value and how far down the precedence ladder it came from (0 flag, 1 env, 2 file).
-type Found<T> = { value: T; rank: number };
-
-function firstFound<T>(...candidates: (T | undefined)[]): Found<T> | undefined {
-  for (const [rank, value] of candidates.entries()) {
-    if (value !== undefined) return { value, rank };
-  }
-  return undefined;
-}
-
-// An empty env var is an unset one, the usual shell convention. An empty flag is an error.
-const fromEnv = (env: Env, name: string) => (env[name] === '' ? undefined : env[name]);
 
 function parseFlags(argv: string[]) {
   try {
@@ -130,20 +108,6 @@ function readFileConfig(file: string, required: boolean): FileConfig {
   return parsed as FileConfig;
 }
 
-function asString(name: string, value: unknown): string {
-  if (typeof value !== 'string' || value === '') {
-    throw new ConfigError(`${name} must be a non-empty string`);
-  }
-  return value;
-}
-
-function absolute(name: string, value: string): string {
-  if (!path.isAbsolute(value)) {
-    throw new ConfigError(`${name} must be an absolute path, got "${value}"`);
-  }
-  return value;
-}
-
 function asList(name: string, value: unknown, separator: string): string[] {
   if (typeof value === 'string') return value.split(separator).filter(Boolean);
   if (Array.isArray(value) && value.every((v) => typeof v === 'string' && v !== '')) return value;
@@ -167,16 +131,6 @@ function asSkillProfile(name: string, value: unknown): SkillProfile {
     );
   }
   return value;
-}
-
-function asPort(name: string, value: unknown): number {
-  const port = typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : value;
-  if (typeof port !== 'number' || !Number.isInteger(port) || port < 1 || port > 65535) {
-    throw new ConfigError(
-      `${name} must be an integer from 1 to 65535, got ${JSON.stringify(value)}`,
-    );
-  }
-  return port;
 }
 
 function resolveDaemonSocket(flag: string | undefined, env: Env, file: FileConfig): string {
@@ -232,36 +186,16 @@ function resolveListen(
   };
 }
 
-// The bearer token comes from TASKFERRY_MCP_TOKEN or from a file only. A flag would show up in
-// `ps`, and a config key would travel with a config file that gets copied, diffed and backed up.
-function resolveToken(tokenFile: Found<unknown> | undefined, env: Env): string {
-  const direct = env.TASKFERRY_MCP_TOKEN?.trim() || undefined;
-  if (direct !== undefined && tokenFile) {
-    throw new ConfigError('set either TASKFERRY_MCP_TOKEN or a token file, not both');
+function validateSurfaceConfig(gateway: GatewayConfig | undefined, token: string, listen: Listen) {
+  if (!gateway) return;
+  if (gateway.token === token) {
+    throw new ConfigError('gateway token must differ from the bridge token');
   }
-  if (direct !== undefined) return direct;
-  if (!tokenFile) {
+  if (listen.kind === 'tcp' && gateway.port === listen.port) {
     throw new ConfigError(
-      'bearer token required: set TASKFERRY_MCP_TOKEN, or pass --token-file / set TASKFERRY_MCP_TOKEN_FILE',
+      `gateway port ${gateway.port} must differ from the TCP listen port; the two surfaces cannot share a listener`,
     );
   }
-  const file = absolute('token file', asString('token file', tokenFile.value));
-  let mode: number;
-  let text: string;
-  try {
-    mode = statSync(file).mode & 0o777;
-    text = readFileSync(file, 'utf8');
-  } catch (e) {
-    throw new ConfigError(`cannot read token file ${file}: ${(e as Error).message}`, { cause: e });
-  }
-  if (mode & 0o077) {
-    throw new ConfigError(
-      `token file ${file} has mode ${mode.toString(8)}; it must not be readable by group or others (chmod 600)`,
-    );
-  }
-  const token = text.trim();
-  if (token === '') throw new ConfigError(`token file ${file} is empty`);
-  return token;
 }
 
 export function resolveConfig({
@@ -313,10 +247,24 @@ export function resolveConfig({
     file.tokenFile,
   );
 
+  const token = resolveToken({
+    directName: 'TASKFERRY_MCP_TOKEN',
+    flagName: '--token-file',
+    fileEnvName: 'TASKFERRY_MCP_TOKEN_FILE',
+    label: 'bearer token',
+    env,
+    tokenFile,
+  });
+  const gateway = resolveGateway(flags, env, file);
+  const daemonSocket = resolveDaemonSocket(flags['daemon-socket'], env, file);
+  const listen = resolveListen(flags, env, file);
+  validateSurfaceConfig(gateway, token, listen);
+
   return {
     ...resolveLimits(flags, env, file),
-    daemonSocket: resolveDaemonSocket(flags['daemon-socket'], env, file),
-    token: resolveToken(tokenFile, env),
+    daemonSocket,
+    token,
+    gateway,
     allowDirectories: directories
       ? asList('allowed directories', directories.value, ':').map((d) =>
           absolute('allowed directory', d),
@@ -329,7 +277,7 @@ export function resolveConfig({
       ? absolute('skill root', asString('skill root', skillRoot.value))
       : defaultSkillRoot(),
     serverRoBinds: serverRoBinds ? asBindRoots('server read-only binds', serverRoBinds.value) : [],
-    listen: resolveListen(flags, env, file),
+    listen,
   };
 }
 

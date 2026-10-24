@@ -4,7 +4,9 @@
 
 ## Architecture
 
-Sites MCP client -> Sites-compatible forwarding service (the deployment adapter is still unwritten) -> authenticated `POST /mcp` -> this bridge -> TaskFerry's private Unix-domain socket.
+MCP client -> authenticated `POST /mcp` -> this bridge -> TaskFerry's private Unix-domain socket. The optional gateway surface is a second authenticated entry point in the same process.
+
+One Node process serves both surfaces. The bridge listens on its configured Unix socket or loopback TCP port and authenticates with the MCP token. When a gateway token is configured, the same process also listens on loopback TCP 8788 and authenticates with that separate token. The gateway surface is not a proxy: it serves the same tools from the same code path, so there is no upstream URL, second HTTP hop, or separately deployed forwarder to drift out of date.
 
 The bridge is TypeScript run directly by Node's native type stripping, so there is no build step. Node is pinned to 26.5.1 in `.mise.toml`. The MCP side uses the official SDK: each request gets a fresh stateless `McpServer` connected to a `NodeStreamableHTTPServerTransport` that answers with JSON. There are no sessions and no SSE stream.
 
@@ -33,7 +35,7 @@ directly.
 
 ## Run tests
 
-`mise run check` runs the full gate: format check, lint, the TypeScript split check, `tsc --noEmit`, and 52 unit tests. CI runs the same steps. `npm test` runs only the tests.
+`mise run check` runs the full gate: format check, lint, the TypeScript split check, `tsc --noEmit`, and 118 unit tests. CI runs the same steps. `npm test` runs only the tests.
 
 The tests start a real stub daemon on a Unix socket and real HTTP listeners on loopback. Two mutation probes are kept in the evidence directory: disabling the scope guard fails the cross-workspace test, and loosening the socket mode fails the permissions test.
 
@@ -64,6 +66,8 @@ Each setting resolves as flag, then environment variable, then config-file key, 
 | `--listen-socket`       | `TASKFERRY_MCP_LISTEN_SOCKET`       | `listenSocket`       | `$XDG_RUNTIME_DIR/taskferry-mcp/mcp.sock` |
 | `--listen-port`         | `TASKFERRY_MCP_LISTEN_PORT`         | `listenPort`         | none                                      |
 | `--token-file`          | `TASKFERRY_MCP_TOKEN_FILE`          | `tokenFile`          | none                                      |
+| `--gateway-port`        | `TASKFERRY_GATEWAY_PORT`            | `gatewayPort`        | `8788`                                    |
+| `--gateway-token-file`  | `TASKFERRY_GATEWAY_TOKEN_FILE`      | `gatewayTokenFile`   | none                                      |
 | `--daemon-timeout-ms`   | `TASKFERRY_MCP_DAEMON_TIMEOUT_MS`   | `daemonTimeoutMs`    | `5000`                                    |
 | `--list-timeout-ms`     | `TASKFERRY_MCP_LIST_TIMEOUT_MS`     | `listTimeoutMs`      | `15000`                                   |
 | `--models-cache-ttl-ms` | `TASKFERRY_MCP_MODELS_CACHE_TTL_MS` | `modelsCacheTtlMs`   | `60000`                                   |
@@ -73,9 +77,9 @@ Each setting resolves as flag, then environment variable, then config-file key, 
 
 The timeout and preview knobs bound a slow call and a large response. `daemonTimeoutMs` is the per-call daemon socket timeout; `listTimeoutMs` bounds the `opencode models` catalog command; `modelsCacheTtlMs` is how long that catalog is cached; `previewChars` is the unconfirmed `taskferry_message` preview length.
 
-The bearer token comes from `TASKFERRY_MCP_TOKEN` or a token file, never both. A token file must not be readable by group or others, and the bridge refuses an empty one. The token is not a flag or a config key, because both leak through `ps`, backups, and diffs.
+The bridge bearer token comes from `TASKFERRY_MCP_TOKEN` or a token file, never both. The gateway token comes from `TASKFERRY_GATEWAY_TOKEN` or `TASKFERRY_GATEWAY_TOKEN_FILE`; configuring one enables the gateway surface. A token file must not be readable by group or others, and an empty one is refused. A token set but blank is a configuration error, not a disabled surface. The bridge and gateway tokens must differ. Tokens are not flags or config keys, because both leak through `ps`, backups, and diffs.
 
-Both surfaces require the exact `Bearer <token>` authorization form: a bare token or any other scheme is refused with 401 at the HTTP layer. The gateway applies the same loopback `Host`/`Origin` checks as the bridge's TCP mode, and both answer every request, refusals included, with `Cache-Control: no-store`.
+Both surfaces require the exact `Bearer <token>` authorization form: a bare token or any other scheme is refused with 401 at the HTTP layer. Each surface accepts only its own token. The gateway applies the loopback `Host`/`Origin` checks unconditionally, as the bridge does in TCP mode, and both answer every request, refusals included, with `Cache-Control: no-store`.
 
 For a client that only speaks HTTP, use a loopback TCP port:
 
@@ -85,16 +89,17 @@ node src/server.ts --listen-port 8787
 
 TCP mode binds `127.0.0.1` and refuses any request whose `Host` or `Origin` is not loopback, even with a valid token. Do not expose this listener directly. TLS and external reachability belong to an authenticated proxy.
 
-## Gateway demonstration
+## Gateway surface
+
+The gateway surface starts in the bridge process whenever a gateway token is set:
 
 ```
-export TASKFERRY_UPSTREAM_URL='http://127.0.0.1:8787/mcp'
-export TASKFERRY_GATEWAY_TOKEN='separate-secret'
 export TASKFERRY_MCP_TOKEN='replace-with-random-secret'
-npm run gateway
+export TASKFERRY_GATEWAY_TOKEN='separate-secret'
+npm start
 ```
 
-`gateway.ts` forwards one configured `/mcp` endpoint with separate inbound and upstream tokens, and listens on port 8788 by default. Like the bridge's TCP mode, it binds `127.0.0.1` only; reaching it from elsewhere is the job of an authenticated proxy. It is a reference implementation. Sites support for this runtime is unverified.
+It listens on loopback TCP 8788 by default (`--gateway-port`, `TASKFERRY_GATEWAY_PORT`, or `gatewayPort` changes it) and serves the same tools with the gateway token instead of the MCP token. The bridge token is refused there, and the gateway token is refused on the bridge listener. The two tokens must differ, and the gateway port must differ from the bridge's TCP port. Like the bridge's TCP mode, it binds `127.0.0.1` only and refuses non-loopback `Host` or `Origin`; reaching it from elsewhere is the job of an authenticated proxy. Setting a gateway port without a token is a configuration error rather than an unauthenticated listener. The old standalone gateway's `TASKFERRY_UPSTREAM_URL` and `PORT` variables are not read; a leftover `TASKFERRY_UPSTREAM_URL` is a configuration error, and the port comes only from the knobs above. The surface is not separately deployable: a Sites-native handler and a real deployment still need the Sites runtime and API.
 
 ## Scope guard
 
@@ -175,9 +180,9 @@ walk the full message without confirming.
 
 - Real TaskFerry integration live passes cover health, list, status, result, message, worktree, summary, dispatch, and dispatched-task results. Changeset accept/reject and cancel are unit-tested against the stub only, because a live call would mutate a real workspace. Resume is covered by unit tests and a live pass that recalled a codeword from the source session. Queue behavior under load, concurrent clients, non-default executors, and very long summaries are still untested. Dispatch stays disabled until both allowlists are set, and read-only binds stay disabled until the bind allowlist is set.
 - MCP compatibility is verified against the official SDK client and raw JSON-RPC over HTTP. The bridge answers with JSON only, so a client that requires SSE or sessions will fail.
-- The suite has 52 cases and does not cover the B01-B18 matrix from the design plan, which is not in this repo.
+- The suite has 118 cases and does not cover the B01-B18 matrix from the design plan, which is not in this repo.
 - Dispatch has no durable idempotency. Do not retry an ambiguous failure automatically.
-- `gateway.ts` is a Node.js prototype. A Sites-native handler and a real deployment need the Sites runtime and API.
+- The gateway surface is part of the bridge process, not a prototype forwarder. A Sites-native handler and a real deployment still need the Sites runtime and API.
 - Validate input schemas, HTTP limits, authentication, dispatch restrictions, CSRF and origin posture, audit logging, secret rotation, and response truncation before production.
 
 ## Evidence

@@ -5,14 +5,17 @@ HTTP MCP bridge to a local TaskFerry daemon. Validated once against a local Task
 ## Commands
 
 - `mise run check`: the full gate (prettier check, eslint, the TypeScript split check, `tsc --noEmit` on 7.x, unit tests). The global pre-commit hook runs it on every commit, so it must pass before a commit lands. CI runs the same steps separately.
-- `mise run run` / `mise run gateway`: start the bridge on its configured listener (a Unix socket by default; `node src/server.ts --listen-port 8787` for loopback TCP) or the forwarding gateway demo (port 8788). Both need the `TASKFERRY_*` variables listed in the README.
+- `mise run run`: start the bridge on its configured listener (a Unix socket by default; `node src/server.ts --listen-port 8787` for loopback TCP). Setting a gateway token also starts the gateway surface on port 8788 in the same process. Both need the `TASKFERRY_*` variables listed in the README.
 - `npm run format` rewrites files; `format:check` only reports.
 
 ## Layout
 
-- `src/server.ts`: HTTP layer (path, auth, method, content type, Host/Origin, MCP transport) and the CLI entry.
+- `src/server.ts`: HTTP layer (path, auth, method, content type, Host/Origin, MCP transport), both surfaces, and the CLI entry.
 - `src/listen.ts`: Unix socket and loopback TCP listeners, including socket permissions and stale-socket replacement.
-- `src/config.ts`: flag/env/config-file precedence, defaults, and token resolution.
+- `src/config.ts`: flag/env/config-file precedence, defaults, and surface validation.
+- `src/config-primitives.ts`: shared precedence, env, path, port, and string coercion helpers.
+- `src/gateway-config.ts`: gateway token/port resolution and the removed upstream-URL check.
+- `src/token.ts`: bridge and gateway token resolution from an env var or a private file.
 - `src/tools.ts`: the seven core tools, their strict schemas, and the dispatch allowlist checks.
 - `src/tools-shared.ts`: shared tool scope, annotations, task-status helpers, and profile-aware bind resolution.
 - `src/skills.ts`: the `worker` and `controller` skill profiles and their read-only bind paths.
@@ -23,9 +26,8 @@ HTTP MCP bridge to a local TaskFerry daemon. Validated once against a local Task
 - `src/scope.ts`: allowed-root check for task directories.
 - `src/daemon.ts`: Unix socket client for the TaskFerry protocol.
 - `src/models.ts`: the `opencode models` catalog runner and its short-lived cache.
-- `src/errors.ts`: shared errno `code` reader for filesystem errors.
-- `src/gateway.ts`: loopback forwarding gateway demo.
-- `test/http.test.ts`, `test/listen.test.ts`, `test/tools.test.ts`, `test/tools-extra.test.ts`, `test/tools-resume.test.ts`, `test/config.test.ts`: tests against a stub daemon on a Unix socket and real loopback HTTP listeners.
+- `src/errors.ts`: shared `ConfigError` and errno `code` reader for filesystem errors.
+- `test/http.test.ts`, `test/listen.test.ts`, `test/gateway.test.ts`, `test/surfaces.test.ts`, `test/tools.test.ts`, `test/tools-extra.test.ts`, `test/tools-resume.test.ts`, `test/config.test.ts`, `test/scope.test.ts`, `test/skills.test.ts`: tests against a stub daemon on a Unix socket and real loopback HTTP listeners.
 - `test/helpers.ts`: the stub daemon, bridge launcher, and MCP call helpers those tests share.
 - `docs/evidence/`: verbatim historical run logs. Do not edit them; `docs/evidence/README.md` explains what they are and which branch and commit each came from.
 

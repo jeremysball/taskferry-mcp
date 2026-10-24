@@ -9,7 +9,6 @@
   },
   "scripts": {
     "start": "node src/server.ts",
-    "gateway": "node src/gateway.ts",
     "test": "npm run test:unit",
     "test:unit": "node --test \"test/**/*.test.ts\"",
     "format": "prettier --write .",

@@ -14,9 +14,9 @@ all.
 (`src/listen.ts`). TCP mode binds `127.0.0.1` and refuses any request whose
 `Host` or `Origin` is not loopback (`src/server.ts`), which blocks DNS
 rebinding and cross-site browser requests before the MCP layer runs.
-`src/gateway.ts` also binds `127.0.0.1`. The README says never to expose the
-listener directly; reaching it from elsewhere is the job of an authenticated
-proxy in front.
+The gateway surface in `src/server.ts` also binds `127.0.0.1` only. The README
+says never to expose the listener directly; reaching it from elsewhere is the
+job of an authenticated proxy in front.
 
 **Becomes a bug if:** a bind-address option lets TCP mode bind a non-loopback
 address, or the Host/Origin check is removed.
@@ -25,18 +25,31 @@ address, or the Host/Origin check is removed.
 
 **Observe:** a client that asks for `text/event-stream`, or that waits for
 progress notifications during a long tool call, receives nothing until the
-upstream call finishes, then a single JSON body.
+daemon call finishes, then a single JSON body.
 
-**Why:** `src/gateway.ts` is a request/response bridge: it reads the whole
-request body, `fetch`es the upstream, awaits `upstream.text()`, and writes the
-status and content type once. It forwards the MCP session and protocol headers
-the upstream needs, but it has no path for a chunked event stream, and the
-bridge behind it answers JSON only (`enableJsonResponse: true` in
-`src/server.ts`). A deployment that needs server-initiated messages needs a
-streaming proxy, not this reference gateway.
+**Why:** the gateway surface is not a proxy. It applies its own token and
+loopback guard, then runs the same stateless request handler as the bridge,
+which answers JSON only (`enableJsonResponse: true` in `src/server.ts`). There
+is no path for a chunked event stream on either surface. A deployment that
+needs server-initiated messages needs a streaming MCP transport, which this
+server does not implement.
 
 **Becomes a bug if:** a client's tool call depends on a notification that must
 arrive before the HTTP response ends.
+
+## The gateway accepts clients that omit the MCP dual Accept header
+
+**Observe:** a request to the gateway surface with `Accept: */*`, or with no
+`Accept` header, succeeds, while the same request to the bridge returns `406`.
+
+**Why:** the standalone gateway always sent `Accept: application/json,
+text/event-stream` upstream, so clients that never learned the dual-header
+requirement kept working. The joined gateway rewrites `req.headers.accept` to
+that same value before the MCP handler runs (`src/server.ts`). The bridge keeps
+strict MCP negotiation because it is the public contract clients should use.
+
+**Becomes a bug if:** the normalization starts accepting content types the MCP
+handler cannot return, or it is applied to the bridge too.
 
 ## Dispatch returns an error until both allowlists are set
 
