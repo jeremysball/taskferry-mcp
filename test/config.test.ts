@@ -17,9 +17,12 @@ import {
 
 const CONFIG_FILE = 'config.json';
 const FILE_SECRET = 'file-secret';
+const GATEWAY_SECRET = 'gateway-secret';
 const PORT = 8787;
 const TOKEN_FILE_FLAG = '--token-file';
 const LISTEN_PORT_FLAG = '--listen-port';
+const GATEWAY_PORT_FLAG = '--gateway-port';
+const GATEWAY_TOKEN_FILE_FLAG = '--gateway-token-file';
 
 const BASE_ENV = {
   XDG_RUNTIME_DIR: '/run/user/9',
@@ -237,7 +240,10 @@ test('the token comes from the env var or from a private file, never both, never
     assert.equal(resolve([], { ...noEnv, TASKFERRY_MCP_TOKEN_FILE: tokenFile }).token, FILE_SECRET);
     assert.throws(() => resolve([TOKEN_FILE_FLAG, tokenFile]), /either TASKFERRY_MCP_TOKEN or/);
     assert.throws(() => resolve([], noEnv), /bearer token required/);
-    assert.throws(() => resolve([], { TASKFERRY_MCP_TOKEN: '   ' }), /bearer token required/);
+    assert.throws(
+      () => resolve([], { TASKFERRY_MCP_TOKEN: '   ' }),
+      /TASKFERRY_MCP_TOKEN is set but empty/,
+    );
   });
 });
 
@@ -251,6 +257,113 @@ test('a token file anyone else can read, or that is empty, is refused', () => {
     chmodSync(tokenFile, 0o600);
     writeFileSync(tokenFile, '\n');
     assert.throws(() => resolve([TOKEN_FILE_FLAG, tokenFile], noEnv), /is empty/);
+  });
+});
+
+test('the gateway surface is absent until a gateway token is configured', () => {
+  assert.equal(resolve().gateway, undefined);
+  assert.deepEqual(resolve([], { TASKFERRY_GATEWAY_TOKEN: GATEWAY_SECRET }).gateway, {
+    token: GATEWAY_SECRET,
+    port: 8788,
+  });
+  assert.deepEqual(resolve([], { TASKFERRY_GATEWAY_TOKEN: ` ${GATEWAY_SECRET} ` }).gateway, {
+    token: GATEWAY_SECRET,
+    port: 8788,
+  });
+});
+
+test('the gateway port follows flag over env over config key over the default', () => {
+  withFiles((dir) => {
+    const file = path.join(dir, CONFIG_FILE);
+    writeJson(file, { gatewayPort: 9100 });
+    assert.equal(resolve([], { TASKFERRY_GATEWAY_TOKEN: GATEWAY_SECRET }).gateway?.port, 8788);
+    assert.equal(
+      resolve(['--config', file], { TASKFERRY_GATEWAY_TOKEN: GATEWAY_SECRET }).gateway?.port,
+      9100,
+    );
+    assert.equal(
+      resolve(['--config', file], {
+        TASKFERRY_GATEWAY_TOKEN: GATEWAY_SECRET,
+        TASKFERRY_GATEWAY_PORT: '9200',
+      }).gateway?.port,
+      9200,
+    );
+    assert.equal(
+      resolve(['--config', file, GATEWAY_PORT_FLAG, '9300'], {
+        TASKFERRY_GATEWAY_TOKEN: GATEWAY_SECRET,
+        TASKFERRY_GATEWAY_PORT: '9200',
+      }).gateway?.port,
+      9300,
+    );
+  });
+});
+
+test('a gateway port without a gateway token is a configuration error', () => {
+  assert.throws(() => resolve([GATEWAY_PORT_FLAG, '9000']), /gateway port set but no gateway/);
+  assert.throws(
+    () => resolve([], { TASKFERRY_GATEWAY_PORT: '9000' }),
+    /gateway port set but no gateway/,
+  );
+  assert.throws(
+    () => resolve([GATEWAY_PORT_FLAG, '0'], { TASKFERRY_GATEWAY_TOKEN: GATEWAY_SECRET }),
+    /gateway port/,
+  );
+});
+
+test('the gateway token must be non-blank and differ from the bridge token', () => {
+  assert.throws(
+    () => resolve([], { TASKFERRY_GATEWAY_TOKEN: '   ' }),
+    /TASKFERRY_GATEWAY_TOKEN is set but empty/,
+  );
+  assert.throws(
+    () => resolve([], { TASKFERRY_GATEWAY_TOKEN: 'secret' }),
+    /gateway token must differ from the bridge token/,
+  );
+});
+
+test('the gateway port must differ from the TCP listen port', () => {
+  assert.throws(
+    () => resolve([LISTEN_PORT_FLAG, '8788'], { TASKFERRY_GATEWAY_TOKEN: GATEWAY_SECRET }),
+    /gateway port 8788 must differ from the TCP listen port/,
+  );
+});
+
+test('the removed upstream URL is rejected instead of ignored', () => {
+  assert.throws(
+    () => resolve([], { TASKFERRY_UPSTREAM_URL: 'http://127.0.0.1:8787/mcp' }),
+    /TASKFERRY_UPSTREAM_URL is no longer supported/,
+  );
+});
+
+test('the gateway token comes from its env var or a private file, never both', () => {
+  withFiles((dir) => {
+    const tokenFile = path.join(dir, 'gateway-token');
+    writeFileSync(tokenFile, `${FILE_SECRET}\n`, { mode: 0o600 });
+    chmodSync(tokenFile, 0o600);
+    const noGatewayEnv = { TASKFERRY_GATEWAY_TOKEN: '' };
+    assert.deepEqual(resolve([GATEWAY_TOKEN_FILE_FLAG, tokenFile], noGatewayEnv).gateway, {
+      token: FILE_SECRET,
+      port: 8788,
+    });
+    assert.equal(
+      resolve([], { ...noGatewayEnv, TASKFERRY_GATEWAY_TOKEN_FILE: tokenFile }).gateway?.token,
+      FILE_SECRET,
+    );
+    assert.throws(
+      () => resolve([GATEWAY_TOKEN_FILE_FLAG, tokenFile], { TASKFERRY_GATEWAY_TOKEN: 'direct' }),
+      /either TASKFERRY_GATEWAY_TOKEN or/,
+    );
+    chmodSync(tokenFile, 0o644);
+    assert.throws(() => resolve([GATEWAY_TOKEN_FILE_FLAG, tokenFile], noGatewayEnv), /mode 644/);
+  });
+});
+
+test('the gateway token is never a config-file key or a flag', () => {
+  withFiles((dir) => {
+    const file = path.join(dir, CONFIG_FILE);
+    writeJson(file, { gatewayToken: 'x' });
+    assert.throws(() => resolve(['--config', file]), /unknown config key "gatewayToken"/);
+    assert.throws(() => resolve(['--gateway-token', 'x']), ConfigError);
   });
 });
 

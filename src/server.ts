@@ -2,7 +2,7 @@ import http from 'node:http';
 import { NodeStreamableHTTPServerTransport } from '@modelcontextprotocol/node';
 import { McpServer } from '@modelcontextprotocol/server';
 import { resolveConfig, type BridgeConfig } from './config.ts';
-import { listenBridge } from './listen.ts';
+import { listenBridge, type Listener } from './listen.ts';
 import { registerChangesetTools } from './tools-changeset.ts';
 import { registerMessageTool } from './tools-message.ts';
 import { registerResumeTool } from './tools-resume.ts';
@@ -56,13 +56,35 @@ async function serveMcp(
   }
 }
 
-export function createBridge(config: BridgeConfig, deps: Partial<ToolDeps> = {}) {
-  if (!config.token) throw new Error('bearer token required');
+function normalizeGatewayAccept(req: http.IncomingMessage): void {
+  const value = 'application/json, text/event-stream';
+  req.headers.accept = value;
+  let found = false;
+  for (let i = 0; i < req.rawHeaders.length; i += 2) {
+    if (req.rawHeaders[i].toLowerCase() === 'accept') {
+      req.rawHeaders[i + 1] = value;
+      found = true;
+    }
+  }
+  if (!found) req.rawHeaders.push('accept', value);
+}
+
+function createSurface(
+  config: BridgeConfig,
+  token: string,
+  loopback: boolean,
+  deps: Partial<ToolDeps>,
+  normalizeAccept = false,
+) {
   return http.createServer((req, res) => {
     res.setHeader('Cache-Control', 'no-store');
+    // The standalone gateway always sent the MCP dual Accept value upstream, so clients
+    // that sent `Accept: */*` or no Accept kept working. Preserve that on the joined
+    // gateway surface only; the bridge keeps its strict MCP content negotiation.
+    if (normalizeAccept) normalizeGatewayAccept(req);
     const status = transportRefusal(req, {
-      token: config.token,
-      loopback: config.listen.kind === 'tcp',
+      token,
+      loopback,
     });
     if (status !== undefined) {
       refuse(res, status);
@@ -76,17 +98,80 @@ export function createBridge(config: BridgeConfig, deps: Partial<ToolDeps> = {})
   });
 }
 
+export function createBridge(config: BridgeConfig, deps: Partial<ToolDeps> = {}) {
+  if (!config.token) throw new Error('bearer token required');
+  return createSurface(config, config.token, config.listen.kind === 'tcp', deps);
+}
+
+// The gateway is a second authenticated MCP surface in the same process. It accepts its own
+// bearer token, always listens on loopback TCP, and serves the same tools.
+export function createGateway(config: BridgeConfig, deps: Partial<ToolDeps> = {}) {
+  if (!config.gateway) throw new Error('gateway token required');
+  if (config.gateway.token.trim() === '') throw new Error('gateway token must not be empty');
+  if (config.gateway.token === config.token) {
+    throw new Error('gateway token must differ from the bridge token');
+  }
+  return createSurface(config, config.gateway.token, true, deps, true);
+}
+
+export type Surfaces = {
+  bridge: http.Server;
+  gateway?: http.Server;
+  close: () => Promise<void>;
+};
+
+// Both surfaces start together or not at all: a gateway that cannot bind closes the bridge
+// listener it was already handed, so a failed start never leaves half the executable up.
+export async function startSurfaces(
+  config: BridgeConfig,
+  deps: Partial<ToolDeps> = {},
+): Promise<Surfaces> {
+  const bridge = createBridge(config, deps);
+  const bridgeListener = await listenBridge(bridge, config.listen);
+  try {
+    if (!config.gateway) {
+      return { bridge, close: bridgeListener.close };
+    }
+    const gateway = createGateway(config, deps);
+    let gatewayListener: Listener;
+    try {
+      gatewayListener = await listenBridge(gateway, {
+        kind: 'tcp',
+        port: config.gateway.port,
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `gateway surface failed to bind on 127.0.0.1:${config.gateway.port}: ${detail}`,
+        { cause: error },
+      );
+    }
+    return {
+      bridge,
+      gateway,
+      close: () =>
+        Promise.all([bridgeListener.close(), gatewayListener.close()]).then(() => undefined),
+    };
+  } catch (error) {
+    await bridgeListener.close();
+    throw error;
+  }
+}
+
 if (process.argv[1]?.endsWith('/server.ts')) {
   try {
     const config = resolveConfig({ argv: process.argv.slice(2), env: process.env });
-    const listener = await listenBridge(createBridge(config), config.listen);
+    const surfaces = await startSurfaces(config);
     const where =
       config.listen.kind === 'unix'
         ? `unix socket ${config.listen.path}`
         : `127.0.0.1:${config.listen.port}`;
     console.log(`TaskFerry MCP listening on ${where}`);
+    if (config.gateway) {
+      console.log(`TaskFerry MCP gateway listening on 127.0.0.1:${config.gateway.port}`);
+    }
     const shutdown = () => {
-      void listener.close().then(() => process.exit(0));
+      void surfaces.close().then(() => process.exit(0));
     };
     process.on('SIGINT', shutdown);
     process.on('SIGTERM', shutdown);

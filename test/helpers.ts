@@ -4,11 +4,13 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { DEFAULT_LIMITS, type BridgeConfig } from '../src/config.ts';
+import { listenBridge } from '../src/listen.ts';
 import type { ToolDeps } from '../src/tools.ts';
 import { createBridge } from '../src/server.ts';
 export { TASK_STATUS } from '../src/tools-shared.ts';
 
 export const TOKEN = 'correct-secret';
+export const GATEWAY_TOKEN = 'gateway-secret';
 export const HEALTH = 'taskferry_health';
 export const STATUS_TOOL = 'taskferry_status';
 
@@ -72,10 +74,15 @@ export const stop = (server: net.Server) =>
   new Promise<void>((resolve) => server.close(() => resolve()));
 
 // Starts `server` on a free loopback TCP port and resolves to its /mcp URL.
-export async function serve(server: http.Server) {
+export const mcpUrl = (server: http.Server) =>
+  `http://127.0.0.1:${(server.address() as net.AddressInfo).port}/mcp`;
+
+export async function freePort() {
+  const server = net.createServer();
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const { port } = server.address() as net.AddressInfo;
-  return `http://127.0.0.1:${port}/mcp`;
+  await stop(server);
+  return port;
 }
 
 function writeChunks(c: net.Socket, out: string | Buffer[]) {
@@ -134,21 +141,19 @@ export async function startBridge(
 ) {
   const ownsSkillRoot = overrides.skillRoot === undefined;
   const skillRoot = overrides.skillRoot ?? createSkillRoot();
-  const bridge = createBridge(
-    bridgeConfig({
-      ...overrides,
-      daemonSocket,
-      skillRoot,
-      listen: overrides.listen ?? { kind: 'tcp', port: 0 },
-    }),
-    deps,
-  );
-  const url = await serve(bridge);
-  return {
-    url,
+  const config = bridgeConfig({
+    ...overrides,
+    daemonSocket,
     skillRoot,
+    listen: overrides.listen ?? { kind: 'tcp', port: 0 },
+  });
+  const bridge = createBridge(config, deps);
+  const listener = await listenBridge(bridge, config.listen);
+  return {
+    skillRoot,
+    url: mcpUrl(bridge),
     close: async () => {
-      await stop(bridge);
+      await listener.close();
       if (ownsSkillRoot) removeDir(skillRoot);
     },
   };
@@ -199,6 +204,7 @@ export function send(url: string, body: string | Buffer[], options: SendOptions 
   };
   if (token !== null) all.authorization = `Bearer ${token}`;
   return new Promise<Sent>((resolve, reject) => {
+    let responded = false;
     const target = new URL(url);
     const req = http.request(
       {
@@ -213,13 +219,21 @@ export function send(url: string, body: string | Buffer[], options: SendOptions 
         let text = '';
         res.setEncoding('utf8');
         res.on('data', (d: string) => (text += d));
-        res.on('end', () => resolve({ status: res.statusCode ?? 0, headers: res.headers, text }));
+        res.on('end', () => {
+          responded = true;
+          if (!req.writableFinished) req.destroy();
+          resolve({ status: res.statusCode ?? 0, headers: res.headers, text });
+        });
       },
     );
     req.on('error', reject);
     const parts = typeof body === 'string' ? [Buffer.from(body)] : body;
     parts.forEach((part, i) =>
-      setTimeout(() => (i === parts.length - 1 ? req.end(part) : req.write(part)), i),
+      setTimeout(() => {
+        if (responded || req.destroyed) return;
+        if (i === parts.length - 1) req.end(part);
+        else req.write(part);
+      }, i),
     );
   });
 }
