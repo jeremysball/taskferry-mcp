@@ -317,6 +317,46 @@ reports `truncated`, so there is no offset to continue from.
 **Becomes a bug if:** one tool starts reporting the other's unit under the same
 field name.
 
+## Events do not include input-needed or a replay cursor
+
+**Observe:** `events/list` returns only `task.completed`, `task.failed` and `task.cancelled`; every delivery has `cursor: null`, and events emitted while the daemon socket was down never arrive.
+
+**Why:** TaskFerry's daemon has no input-needed state, so advertising `task.input_needed` would promise an event the bridge can never emit. Its `event.subscribe` protocol also has no cursor or replay: a reconnect starts a fresh subscription and the gap is genuinely lost. The bridge exposes exactly the terminal states the daemon emits and derives a stable `eventId` so duplicate live frames collapse, but it does not invent a history.
+
+**Becomes a bug if:** the daemon gains an input-needed state or a replay cursor and the bridge keeps hiding it, or a retry after a disconnect silently claims delivery of a missed event.
+
+## A failed task and an unknown task share `task.failed`
+
+**Observe:** both a `crashed` task and a task whose status became `unknown` produce `task.failed`, with the raw status only inside `data.status`.
+
+**Why:** the public event names are a small, stable lifecycle vocabulary, not a mirror of every daemon status. `crashed` and `unknown` are both non-success terminal outcomes, so one failure event keeps subscribers from needing to enumerate daemon internals. The exact status remains in the payload.
+
+**Becomes a bug if:** a caller cannot tell a failure from a success, or a new non-success terminal status is silently dropped instead of mapped.
+
+## Re-subscribing to the same callback does not re-challenge it
+
+**Observe:** calling `events/subscribe` twice with the same event, URL, arguments and secret returns the same `sub_...` id and sends no second verification request. The same identity with a different secret does re-verify.
+
+**Why:** subscription identity is `(principal, normalized URL, event name, canonical arguments)`, and successful verification is cached for five minutes per principal, URL and secret hash. Repeating an idempotent subscribe must not spam the callback or rotate the subscription. Changing the secret rotates the signing key, so the endpoint must prove control again before the bridge stores it.
+
+**Becomes a bug if:** a changed URL or secret reuses the old verification, or an unrelated caller gets the same subscription id.
+
+## A callback on a private address is refused even if it is reachable
+
+**Observe:** `events/subscribe` refuses `https://127.0.0.1/...`, `https://10.x/...`, link-local, documentation and reserved addresses, and any hostname with even one non-public DNS answer, with JSON-RPC `-32015` and no outbound request.
+
+**Why:** the callback URL comes from a remote caller, so delivery is an SSRF primitive. The bridge requires HTTPS, resolves and checks every address, pins the checked address for the connection, and disables redirects. A deployment that needs an internal receiver must expose a public HTTPS endpoint in front of it; the bridge does not add a private-address exception.
+
+**Becomes a bug if:** a public hostname with one private AAAA record is accepted, a redirect is followed, or a URL/secret appears in a log line.
+
+## `server/discover` only appears on the modern path
+
+**Observe:** a hand-built POST to `server/discover` with no `_meta` envelope returns `-32601 Method not found`, while the same call with the `2026-07-28` envelope and standard headers succeeds.
+
+**Why:** the SDK classifies a request without the per-request envelope claim as legacy, and TaskFerry's legacy 2025-era dialect has no `server/discover`. Modern clients, including ChatGPT, send the envelope and headers. The bridge deliberately keeps one routing decision instead of answering modern discovery on a legacy connection, so the response cannot advertise a protocol the caller is not speaking.
+
+**Becomes a bug if:** a correctly enveloped discover request is routed legacy, or the legacy `initialize` response starts advertising `2026-07-28`.
+
 ## Resume refuses a running source task
 
 **Observe:** `taskferry_resume` fails with "task is still running" even though

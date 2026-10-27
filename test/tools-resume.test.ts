@@ -35,6 +35,7 @@ type TaskFields = {
   status: string;
   sessionId?: string;
   model?: string;
+  executorId?: string | null;
 };
 
 const statusReply = (req: Call, fields: TaskFields) =>
@@ -211,7 +212,12 @@ test('resume rejects caller-supplied workspace, model and session overrides', as
     allowModels: [MODEL],
   });
   try {
-    for (const extra of [{ directory: daemon.dir }, { model: MODEL }, { sessionId: SESSION_ID }]) {
+    for (const extra of [
+      { directory: daemon.dir },
+      { model: MODEL },
+      { sessionId: SESSION_ID },
+      { executor: 'kilo' },
+    ]) {
       const rejected = await resume(bridge.url, {
         taskId: TASK_ID,
         prompt: PROMPT,
@@ -223,6 +229,122 @@ test('resume rejects caller-supplied workspace, model and session overrides', as
     assert.deepEqual(
       daemon.calls.filter((c) => c.method === TASK_DISPATCH),
       [],
+    );
+  } finally {
+    await bridge.close();
+    await daemon.close();
+  }
+});
+
+test('resume forwards the source task recorded executor with the same session, model and directory', async () => {
+  let root = '';
+  const daemon = await stubDaemon((req) => {
+    if (req.method === TASK_STATUS) {
+      return statusReply(req, {
+        directory: root,
+        status: DONE,
+        sessionId: SESSION_ID,
+        model: MODEL,
+        executorId: 'kilo',
+      });
+    }
+    return okReply(req, { id: NEW_TASK_ID });
+  });
+  root = daemon.dir;
+  const bridge = await startBridge(daemon.socket, {
+    allowDirectories: [daemon.dir],
+    allowModels: [MODEL],
+    skillProfile: 'none',
+  });
+  try {
+    const result = await resume(bridge.url, { taskId: TASK_ID, prompt: PROMPT });
+    assert.notEqual(result.result?.isError, true);
+    assert.deepEqual(
+      daemon.calls.map((c) => [c.method, c.params]),
+      [
+        [TASK_STATUS, { taskId: TASK_ID }],
+        [
+          TASK_DISPATCH,
+          {
+            model: MODEL,
+            sessionId: SESSION_ID,
+            executor: 'kilo',
+            directory: daemon.dir,
+            prompt: PROMPT,
+          },
+        ],
+      ],
+    );
+  } finally {
+    await bridge.close();
+    await daemon.close();
+  }
+});
+
+test('resume omits executor when an older daemon reports no executorId or null', async () => {
+  let root = '';
+  let executorId: string | null | undefined;
+  const daemon = await stubDaemon((req) => {
+    if (req.method === TASK_STATUS) {
+      return statusReply(req, {
+        directory: root,
+        status: DONE,
+        sessionId: SESSION_ID,
+        model: MODEL,
+        executorId,
+      });
+    }
+    return okReply(req, { id: NEW_TASK_ID });
+  });
+  root = daemon.dir;
+  const bridge = await startBridge(daemon.socket, {
+    allowDirectories: [daemon.dir],
+    allowModels: [MODEL],
+    skillProfile: 'none',
+  });
+  try {
+    for (const value of [undefined, null]) {
+      executorId = value;
+      const result = await resume(bridge.url, { taskId: TASK_ID, prompt: PROMPT });
+      assert.notEqual(result.result?.isError, true, String(value));
+      const dispatch = daemon.calls.filter((c) => c.method === TASK_DISPATCH).at(-1);
+      assert.deepEqual(dispatch?.params, {
+        model: MODEL,
+        sessionId: SESSION_ID,
+        directory: daemon.dir,
+        prompt: PROMPT,
+      });
+      assert.equal(Object.hasOwn(dispatch?.params ?? {}, 'executor'), false);
+    }
+  } finally {
+    await bridge.close();
+    await daemon.close();
+  }
+});
+
+test('resume refuses an unsupported recorded executorId without dispatching', async () => {
+  let root = '';
+  const daemon = await stubDaemon((req) =>
+    statusReply(req, {
+      directory: root,
+      status: DONE,
+      sessionId: SESSION_ID,
+      model: MODEL,
+      executorId: 'claude',
+    }),
+  );
+  root = daemon.dir;
+  const bridge = await startBridge(daemon.socket, {
+    allowDirectories: [daemon.dir],
+    allowModels: [MODEL],
+  });
+  try {
+    const response = await resume(bridge.url, { taskId: TASK_ID, prompt: PROMPT });
+    assert.equal(response.result?.isError, true);
+    assert.match(response.result?.content?.[0]?.text ?? '', /unsupported executor: claude/);
+    assert.deepEqual(
+      daemon.calls.map((req) => req.method),
+      [TASK_STATUS],
     );
   } finally {
     await bridge.close();
