@@ -439,6 +439,37 @@ test('environment tokens are trimmed before bearer authentication', async () => 
   }
 });
 
+test('event subscription state resolves by flag, env, file and XDG state default', () => {
+  const c = resolve();
+  assert.equal(
+    c.eventsStatePath,
+    path.join(homedir(), '.local', 'state', 'taskferry-mcp', 'events.json'),
+  );
+  assert.equal(
+    resolve([], { XDG_STATE_HOME: '/state/home' }).eventsStatePath,
+    '/state/home/taskferry-mcp/events.json',
+  );
+  withFiles((dir) => {
+    const file = path.join(dir, CONFIG_FILE);
+    const stateFile = '/file/events.json';
+    const envFile = '/env/events.json';
+    const flagFile = '/flag/events.json';
+    writeJson(file, { eventsStatePath: stateFile });
+    assert.equal(resolve(['--config', file]).eventsStatePath, stateFile);
+    assert.equal(
+      resolve(['--config', file], { TASKFERRY_MCP_EVENTS_STATE: envFile }).eventsStatePath,
+      envFile,
+    );
+    assert.equal(
+      resolve(['--config', file, '--events-state', flagFile], {
+        TASKFERRY_MCP_EVENTS_STATE: envFile,
+      }).eventsStatePath,
+      flagFile,
+    );
+  });
+  assert.throws(() => resolve(['--events-state', 'relative.json']), /absolute path/);
+});
+
 test('computed socket defaults require absolute runtime paths', () => {
   assert.throws(() => resolve([], { XDG_RUNTIME_DIR: 'relative' }), /absolute path/);
   assert.throws(() => resolve([], { TASKFERRY_RUNTIME_DIR: 'relative' }), /absolute path/);

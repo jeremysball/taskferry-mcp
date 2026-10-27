@@ -48,6 +48,16 @@ export const ALLOWLIST_REQUIRED = 'workspace allowlist required';
 // something other than whitespace. The pattern keeps the value as sent, unlike `.trim()`.
 export const nonBlank = z.string().regex(/\S/, 'must not be blank');
 
+// The daemon's executor names. Keep this list in step with TaskFerry's
+// `KNOWN_EXECUTORS`; the bridge validates before forwarding so an unknown name
+// fails at the tool boundary instead of halfway through a dispatch.
+export const EXECUTORS = ['opencode', 'pi', 'kilo'] as const;
+export type Executor = (typeof EXECUTORS)[number];
+
+export function isExecutor(value: unknown): value is Executor {
+  return typeof value === 'string' && (EXECUTORS as readonly string[]).includes(value);
+}
+
 export const READ_ONLY = { readOnlyHint: true, openWorldHint: false } as const;
 export const WRITES = {
   readOnlyHint: false,

@@ -41,10 +41,13 @@ export type BridgeConfig = {
   serverRoBinds: string[];
   listen: Listen;
   gateway?: GatewayConfig;
+  eventsStatePath?: string;
 } & Partial<BridgeLimits>;
 
 const DAEMON_SOCKET = 'daemon socket';
 const LISTEN_SOCKET = 'listen socket';
+const EVENTS_STATE = 'events state path';
+const APP_DIR = 'taskferry-mcp';
 
 // Flag, then env var, then config-file key, then default. Every knob is a triplet; the token is
 // the exception and is deliberately not a flag or a config key (see resolveToken).
@@ -57,6 +60,7 @@ const FLAGS = {
   'skill-profile': { type: 'string' },
   'skill-root': { type: 'string' },
   'server-ro-binds': { type: 'string' },
+  'events-state': { type: 'string' },
   'listen-socket': { type: 'string' },
   'listen-port': { type: 'string' },
   'token-file': { type: 'string' },
@@ -78,7 +82,23 @@ function parseFlags(argv: string[]) {
 
 function defaultConfigFile(env: Env) {
   const base = env.XDG_CONFIG_HOME || path.join(homedir(), '.config');
-  return path.join(base, 'taskferry-mcp', 'config.json');
+  return path.join(base, APP_DIR, 'config.json');
+}
+
+function defaultEventsStateFile(env: Env) {
+  const base = env.XDG_STATE_HOME || path.join(homedir(), '.local', 'state');
+  return path.join(base, APP_DIR, 'events.json');
+}
+
+function resolveEventsStatePath(flag: string | undefined, env: Env, file: FileConfig) {
+  const found = firstFound<unknown>(
+    flag,
+    fromEnv(env, 'TASKFERRY_MCP_EVENTS_STATE'),
+    file.eventsStatePath,
+  );
+  return found
+    ? absolute(EVENTS_STATE, asString(EVENTS_STATE, found.value))
+    : defaultEventsStateFile(env);
 }
 
 function readFileConfig(file: string, required: boolean): FileConfig {
@@ -198,6 +218,15 @@ function validateSurfaceConfig(gateway: GatewayConfig | undefined, token: string
   }
 }
 
+function resolveBootstrap(flags: ReturnType<typeof parseFlags>, env: Env, file: FileConfig) {
+  return {
+    gateway: resolveGateway(flags, env, file),
+    daemonSocket: resolveDaemonSocket(flags['daemon-socket'], env, file),
+    listen: resolveListen(flags, env, file),
+    eventsStatePath: resolveEventsStatePath(flags['events-state'], env, file),
+  };
+}
+
 export function resolveConfig({
   argv,
   env,
@@ -255,9 +284,7 @@ export function resolveConfig({
     env,
     tokenFile,
   });
-  const gateway = resolveGateway(flags, env, file);
-  const daemonSocket = resolveDaemonSocket(flags['daemon-socket'], env, file);
-  const listen = resolveListen(flags, env, file);
+  const { gateway, daemonSocket, listen, eventsStatePath } = resolveBootstrap(flags, env, file);
   validateSurfaceConfig(gateway, token, listen);
 
   return {
@@ -265,6 +292,7 @@ export function resolveConfig({
     daemonSocket,
     token,
     gateway,
+    eventsStatePath,
     allowDirectories: directories
       ? asList('allowed directories', directories.value, ':').map((d) =>
           absolute('allowed directory', d),

@@ -238,6 +238,90 @@ test('dispatch names the denied side and forwards the reasoning variant', async 
   }
 });
 
+test('dispatch forwards every explicit executor and a provider/model id unchanged', async () => {
+  const daemon = await stubDaemon((req) => okReply(req, { id: 'new-task' }));
+  const model = 'llmgateway/glm-5.3-flash';
+  const bridge = await startBridge(daemon.socket, {
+    allowDirectories: [daemon.dir],
+    allowModels: [model],
+    skillProfile: 'none',
+  });
+  try {
+    for (const executor of ['opencode', 'pi', 'kilo']) {
+      const res = await call(
+        bridge.url,
+        toolCall('taskferry_dispatch', {
+          directory: daemon.dir,
+          prompt: 'hi',
+          executor,
+          model,
+        }),
+      );
+      assert.notEqual(res.result?.isError, true, executor);
+      assert.deepEqual(daemon.calls.at(-1)?.params, {
+        directory: daemon.dir,
+        prompt: 'hi',
+        executor,
+        model,
+      });
+    }
+  } finally {
+    await bridge.close();
+    await daemon.close();
+  }
+});
+
+test('dispatch omits the executor key when the argument is omitted', async () => {
+  const daemon = await stubDaemon((req) => okReply(req, { id: 'new-task' }));
+  const model = 'good';
+  const bridge = await startBridge(daemon.socket, {
+    allowDirectories: [daemon.dir],
+    allowModels: [model],
+    skillProfile: 'none',
+  });
+  try {
+    const res = await call(
+      bridge.url,
+      toolCall('taskferry_dispatch', { directory: daemon.dir, prompt: 'hi', model }),
+    );
+    assert.notEqual(res.result?.isError, true);
+    assert.equal(daemon.calls.length, 1);
+    const params = daemon.calls[0]?.params ?? {};
+    assert.equal(Object.hasOwn(params, 'executor'), false);
+  } finally {
+    await bridge.close();
+    await daemon.close();
+  }
+});
+
+test('dispatch rejects invalid executor values before calling the daemon', async () => {
+  const daemon = await stubDaemon((req) => okReply(req, { id: 'new-task' }));
+  const model = 'good';
+  const bridge = await startBridge(daemon.socket, {
+    allowDirectories: [daemon.dir],
+    allowModels: [model],
+    skillProfile: 'none',
+  });
+  try {
+    for (const executor of ['claude', 'Kilo', '']) {
+      const res = await call(
+        bridge.url,
+        toolCall('taskferry_dispatch', {
+          directory: daemon.dir,
+          prompt: 'hi',
+          executor,
+          model,
+        }),
+      );
+      assert.equal(res.result?.isError, true, JSON.stringify(executor));
+    }
+    assert.equal(daemon.calls.length, 0);
+  } finally {
+    await bridge.close();
+    await daemon.close();
+  }
+});
+
 test('read-only binds are allowlisted, resolved and forwarded only when requested', async () => {
   const daemon = await stubDaemon((req) => okReply(req, { id: 'new-task' }));
   const allowedDir = tempDir('tf-ro-bind-');

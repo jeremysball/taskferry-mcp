@@ -52,7 +52,11 @@ export function createSkillRoot() {
 
 // The single source of test bridge config. Production defaults come from resolveConfig; this
 // factory exists so a new required field updates every test once.
+let unusedEventsState = 0;
+
 export function bridgeConfig(overrides: Partial<BridgeConfig> = {}): BridgeConfig {
+  const slot = unusedEventsState;
+  unusedEventsState += 1;
   return {
     daemonSocket: '',
     token: TOKEN,
@@ -63,6 +67,7 @@ export function bridgeConfig(overrides: Partial<BridgeConfig> = {}): BridgeConfi
     skillRoot: path.join(tmpdir(), 'tf-skill-root-unused'),
     serverRoBinds: [],
     listen: { kind: 'tcp', port: 0 },
+    eventsStatePath: path.join(tmpdir(), `tf-events-unused-${process.pid}-${slot}.json`),
     ...DEFAULT_LIMITS,
     ...overrides,
   };
@@ -98,6 +103,9 @@ export async function stubDaemon(reply: (req: Call) => string | Buffer[]) {
   const calls: Call[] = [];
   const server = net.createServer((c) => {
     let buffer = '';
+    // A monitor connection is intentionally torn down with destroy(); reset errors on the
+    // server side are expected and must not become uncaught test failures.
+    c.on('error', () => {});
     c.on('data', (chunk) => {
       buffer += chunk.toString();
       let n = buffer.indexOf('\n');

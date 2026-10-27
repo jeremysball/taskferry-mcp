@@ -11,9 +11,11 @@ import {
   assertAllowedModel,
   assertAllowedDirectory,
   buildDispatchRequest,
+  EXECUTORS,
   inScopeStatus,
   nonBlank,
   readTaskResult,
+  type Executor,
   type ToolDeps,
   type ToolScope,
 } from './tools-shared.ts';
@@ -200,6 +202,7 @@ type DispatchArgs = {
   prompt: string;
   variant?: string;
   roBind?: readonly string[];
+  executor?: Executor;
 };
 
 async function dispatchTask(args: DispatchArgs, scope: ToolScope) {
@@ -208,6 +211,10 @@ async function dispatchTask(args: DispatchArgs, scope: ToolScope) {
   return callDaemon(scope, 'task.dispatch', {
     directory: real,
     model: args.model,
+    // Omitted executor is not the same as an explicit "opencode": let the
+    // daemon apply its configured default, as every bridge release before
+    // this argument existed did.
+    ...(args.executor === undefined ? {} : { executor: args.executor }),
     ...(await buildDispatchRequest(args, scope)),
   });
 }
@@ -287,13 +294,14 @@ export function registerTools(server: McpServer, scope: ToolScope, deps: Partial
     'taskferry_dispatch',
     {
       description:
-        'Queue a background task and return its id immediately. Poll taskferry_status until it settles, then read taskferry_result. directory must be an allowed workspace and model an allowed model; call taskferry_models to see allowed ids. variant sets the model reasoning level, for example low, high, xhigh, max, highest, or a model-specific name; omit it for the TaskFerry default. roBind optionally exposes host paths read-only inside the task sandbox; every path must be on the bridge read-only bind allowlist.',
+        'Queue a background task and return its id immediately. Poll taskferry_status until it settles, then read taskferry_result. directory must be an allowed workspace and model an allowed model; call taskferry_models to see allowed ids. executor selects the worker CLI: opencode, pi, or kilo; omit it to use the daemon configured default. The model id is passed through unchanged in provider/model form, which is also how Kilo names its models. variant sets the model reasoning level, for example low, high, xhigh, max, highest, or a model-specific name; omit it for the TaskFerry default. roBind optionally exposes host paths read-only inside the task sandbox; every path must be on the bridge read-only bind allowlist.',
       inputSchema: z.strictObject({
         directory: nonBlank,
         model: nonBlank,
         prompt: nonBlank,
         variant: nonBlank.max(64).optional(),
         roBind: roBinds,
+        executor: z.enum(EXECUTORS).optional(),
       }),
       annotations: WRITES,
     },
