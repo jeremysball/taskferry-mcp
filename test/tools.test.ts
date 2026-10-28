@@ -81,12 +81,23 @@ test('every tool schema is strict, and only the write tools are not read-only', 
       'taskferry_resume',
       'taskferry_summary',
     ]);
+    const destructive = new Set([
+      'taskferry_accept',
+      'taskferry_cancel',
+      'taskferry_dispatch',
+      'taskferry_reject',
+    ]);
     for (const tool of tools) {
       assert.equal(tool.inputSchema.additionalProperties, false, `${tool.name} accepts extra keys`);
       assert.equal(
         tool.annotations?.readOnlyHint,
         !writes.has(tool.name),
         `${tool.name} readOnlyHint`,
+      );
+      assert.equal(
+        tool.annotations?.destructiveHint === true,
+        destructive.has(tool.name),
+        `${tool.name} destructiveHint`,
       );
     }
   } finally {

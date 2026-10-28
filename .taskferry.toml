@@ -1,2 +1,2 @@
 # taskferry project config: verification gate for changesets
-check = "mise run check"
+check = 'PATH="/home/jeremy/.local/bin:$PATH" mise run check'

@@ -5,6 +5,7 @@ import { listOpencodeModels } from './models.ts';
 import { inResolvedRoot, resolveRoots } from './scope.ts';
 import {
   ALLOWLIST_REQUIRED,
+  DESTRUCTIVE,
   READ_ONLY,
   WRITES,
   asText,
@@ -65,6 +66,15 @@ const STATUSES = ['queued', 'running', 'done', 'crashed', 'cancelled', 'unknown'
 
 const taskArgs = z.strictObject({ taskId: nonBlank });
 const roBinds = z.array(nonBlank).max(32).optional();
+const dispatchInput = z.strictObject({
+  directory: nonBlank,
+  model: nonBlank,
+  prompt: nonBlank,
+  variant: nonBlank.max(64).optional(),
+  roBind: roBinds,
+  executor: z.enum(EXECUTORS).optional(),
+  noSandbox: z.boolean().optional(),
+});
 const resultArgs = z.strictObject({
   taskId: nonBlank,
   full: z.boolean().optional(),
@@ -203,6 +213,7 @@ type DispatchArgs = {
   variant?: string;
   roBind?: readonly string[];
   executor?: Executor;
+  noSandbox?: boolean;
 };
 
 async function dispatchTask(args: DispatchArgs, scope: ToolScope) {
@@ -215,6 +226,9 @@ async function dispatchTask(args: DispatchArgs, scope: ToolScope) {
     // daemon apply its configured default, as every bridge release before
     // this argument existed did.
     ...(args.executor === undefined ? {} : { executor: args.executor }),
+    // An explicit false is forwarded as false rather than dropped; noSandbox
+    // is per-dispatch and the daemon sandboxes unless it receives true.
+    ...(args.noSandbox === undefined ? {} : { noSandbox: args.noSandbox }),
     ...(await buildDispatchRequest(args, scope)),
   });
 }
@@ -294,16 +308,9 @@ export function registerTools(server: McpServer, scope: ToolScope, deps: Partial
     'taskferry_dispatch',
     {
       description:
-        'Queue a background task and return its id immediately. Poll taskferry_status until it settles, then read taskferry_result. directory must be an allowed workspace and model an allowed model; call taskferry_models to see allowed ids. executor selects the worker CLI: opencode, pi, or kilo; omit it to use the daemon configured default. The model id is passed through unchanged in provider/model form, which is also how Kilo names its models. variant sets the model reasoning level, for example low, high, xhigh, max, highest, or a model-specific name; omit it for the TaskFerry default. roBind optionally exposes host paths read-only inside the task sandbox; every path must be on the bridge read-only bind allowlist.',
-      inputSchema: z.strictObject({
-        directory: nonBlank,
-        model: nonBlank,
-        prompt: nonBlank,
-        variant: nonBlank.max(64).optional(),
-        roBind: roBinds,
-        executor: z.enum(EXECUTORS).optional(),
-      }),
-      annotations: WRITES,
+        'Queue a background task and return its id immediately. Poll taskferry_status until it settles, then read taskferry_result. directory must be an allowed workspace and model an allowed model; call taskferry_models to see allowed ids. executor selects the worker CLI: opencode, pi, or kilo; omit it to use the daemon configured default. The model id is passed through unchanged in provider/model form, which is also how Kilo names its models. variant sets the model reasoning level, for example low, high, xhigh, max, highest, or a model-specific name; omit it for the TaskFerry default. roBind optionally exposes host paths read-only inside the task sandbox; every path must be on the bridge read-only bind allowlist. noSandbox is an optional per-dispatch boolean, false by default: true disables the bwrap filesystem sandbox for this task, so it runs directly on the host filesystem, writes land on real host paths, and no copy-on-write overlay or accept/reject gate applies. That removes filesystem isolation and is not the same as noOverlay. false or omitted requests the normal path, but cannot re-enable the sandbox when the daemon has sandboxing disabled globally. The bridge directory, model, and bind allowlists are enforced before forwarding; they gate what may be dispatched and do not limit what the worker can read or write on the host after an unsandboxed launch.',
+      inputSchema: dispatchInput,
+      annotations: DESTRUCTIVE,
     },
     async (args) => asText(await dispatchTask(args, scope)),
   );
