@@ -25,7 +25,7 @@ export type Reply = {
     tools?: {
       name: string;
       inputSchema: { additionalProperties?: boolean };
-      annotations?: { readOnlyHint?: boolean };
+      annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean };
     }[];
   };
   error?: { code: number; message: string };

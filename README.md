@@ -17,25 +17,25 @@ runs the local `opencode models` command, and `taskferry_worktree` reads the
 task's dispatch directory locally. A caller cannot name a daemon method
 directly.
 
-| Tool                 | Source            | Notes                                                                |
-| -------------------- | ----------------- | -------------------------------------------------------------------- |
-| `taskferry_health`   | `system.health`   |                                                                      |
-| `taskferry_list`     | `task.list`       | All allowed workspaces by default; optional directory                |
-| `taskferry_models`   | `opencode models` | Allowed ids, missing allowlist entries, optional query               |
-| `taskferry_status`   | `task.status`     | Scope-guarded; full lifecycle fields                                 |
-| `taskferry_result`   | `task.result`     | Scope-guarded; optional `fields` and `full`                          |
-| `taskferry_message`  | `task.result`     | Scope-guarded; final message, preview until `confirm: true`          |
-| `taskferry_summary`  | `task.summary`    | Scope-guarded; queues a summary task                                 |
-| `taskferry_dispatch` | `task.dispatch`   | Needs both allowlists; optional `executor`, `variant`, `roBind`      |
-| `taskferry_resume`   | `task.dispatch`   | Continues a settled task's session; derives workspace/model/executor |
-| `taskferry_accept`   | `task.accept`     | Scope-guarded; applies a pending changeset                           |
-| `taskferry_reject`   | `task.reject`     | Scope-guarded; refuses and discards a pending changeset              |
-| `taskferry_cancel`   | `task.cancel`     | Scope-guarded; optional `graceMs`                                    |
-| `taskferry_worktree` | local filesystem  | Read-only view inside the task dispatch directory                    |
+| Tool                 | Source            | Notes                                                                        |
+| -------------------- | ----------------- | ---------------------------------------------------------------------------- |
+| `taskferry_health`   | `system.health`   |                                                                              |
+| `taskferry_list`     | `task.list`       | All allowed workspaces by default; optional directory                        |
+| `taskferry_models`   | `opencode models` | Allowed ids, missing allowlist entries, optional query                       |
+| `taskferry_status`   | `task.status`     | Scope-guarded; full lifecycle fields                                         |
+| `taskferry_result`   | `task.result`     | Scope-guarded; optional `fields` and `full`                                  |
+| `taskferry_message`  | `task.result`     | Scope-guarded; final message, preview until `confirm: true`                  |
+| `taskferry_summary`  | `task.summary`    | Scope-guarded; queues a summary task                                         |
+| `taskferry_dispatch` | `task.dispatch`   | Needs both allowlists; optional `executor`, `variant`, `roBind`, `noSandbox` |
+| `taskferry_resume`   | `task.dispatch`   | Continues a settled task's session; derives workspace/model/executor         |
+| `taskferry_accept`   | `task.accept`     | Scope-guarded; applies a pending changeset                                   |
+| `taskferry_reject`   | `task.reject`     | Scope-guarded; refuses and discards a pending changeset                      |
+| `taskferry_cancel`   | `task.cancel`     | Scope-guarded; optional `graceMs`                                            |
+| `taskferry_worktree` | local filesystem  | Read-only view inside the task dispatch directory                            |
 
 ## Run tests
 
-`mise run check` runs the full gate: format check, lint, the TypeScript split check, `tsc --noEmit`, and 145 unit tests. CI runs the same steps. `npm test` runs only the tests.
+`mise run check` runs the full gate: format check, lint, the TypeScript split check, `tsc --noEmit`, and 148 unit tests. CI runs the same steps. `npm test` runs only the tests.
 
 The tests start a real stub daemon on a Unix socket and real HTTP listeners on loopback. Two mutation probes are kept in the evidence directory: disabling the scope guard fails the cross-workspace test, and loosening the socket mode fails the permissions test.
 
@@ -143,6 +143,8 @@ An unknown task ID and an out-of-scope one both answer "task not accessible", wh
 `taskferry_dispatch` also accepts an optional `variant` string for the model reasoning level, for example `low`, `high`, `xhigh`, `max`, or `highest`; it forwards the value to the daemon as `variant` and omits it when unset. A denied request says whether the workspace or the model failed and includes the allowed models.
 
 `taskferry_dispatch` also accepts an optional `roBind` array of absolute host paths. Each path is resolved with `realpathSync` and must be on the read-only bind allowlist, either as the exact file or under an allowed directory. The bridge forwards the resolved paths to the daemon as `roBind`, which mounts each one read-only at the same path inside the task sandbox. There is no read-write bind surface.
+
+`taskferry_dispatch` also accepts an optional `noSandbox` boolean, `false` by default. It maps to TaskFerry's per-dispatch `noSandbox` field, the protocol field behind `taskferry dispatch --no-sandbox`. The bridge forwards explicit `true` or `false` and omits the field when the argument is absent, so the daemon keeps its existing default. `noSandbox: true` removes filesystem isolation for that task: the worker runs directly on the host filesystem, writes land on real host paths, and no copy-on-write overlay or `accept`/`reject` gate protects the target directory. That is broader than `noOverlay`, which only removes the overlay and leaves the bwrap sandbox in place. An explicit `false` (or omission) selects the normal path, but it cannot re-enable sandboxing if the daemon has sandboxing disabled globally. The directory, model, and read-only bind allowlists are checked before forwarding; they limit what the bridge will dispatch, not what an unsandboxed worker can read or write on the host after launch.
 
 ## Skill profiles
 
