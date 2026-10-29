@@ -106,10 +106,17 @@ function eventBodies(requests: readonly CallbackRequest[]) {
     .filter((body) => body.type !== 'verification');
 }
 
-async function fixture(extraWorkspaces: readonly string[] = []) {
+type FixtureOptions = {
+  extraWorkspaces?: readonly string[];
+  emptyAllowlist?: boolean;
+};
+
+async function fixture({ extraWorkspaces = [], emptyAllowlist = false }: FixtureOptions = {}) {
   const workspace = realpathSync(tempDir('tf-events-workspace-'));
   const stateDir = tempDir('tf-events-state-');
-  const allowDirectories = [workspace, ...extraWorkspaces.map((dir) => realpathSync(dir))];
+  const allowDirectories = emptyAllowlist
+    ? []
+    : [workspace, ...extraWorkspaces.map((dir) => realpathSync(dir))];
   const daemon = await stubDaemon((request) =>
     okReply(
       request,
@@ -356,17 +363,17 @@ test('a directory argument narrows delivery to that workspace subtree', async ()
 
 test('arguments.all watches every allowed workspace and cannot combine with a directory', async () => {
   const second = tempDir('tf-events-second-');
-  const app = await fixture([second]);
+  const app = await fixture({ extraWorkspaces: [second] });
   try {
     app.setHandler(mixedReply);
     const response = await app.subscribe({ arguments: { all: true } });
     assert.ok(response.result, JSON.stringify(response.error));
 
+    const outside = path.join(app.stateDir, 'outside-workspace');
+    mkdirSync(outside);
     await app.events.ingest(taskState('task-primary', DONE, app.workspace, 1));
     await app.events.ingest(taskState('task-other-root', DONE, realpathSync(second), 2));
-    await app.events.ingest(
-      taskState('task-outside', DONE, path.join(app.stateDir, 'outside-workspace'), 3),
-    );
+    await app.events.ingest(taskState('task-outside', DONE, outside, 3));
     await waitFor(() => eventBodies(app.requests).length === 2, 'one event per allowed root');
     assert.deepEqual(
       eventBodies(app.requests).map((body) => (body.data as { taskId: string }).taskId),
@@ -385,6 +392,19 @@ test('arguments.all watches every allowed workspace and cannot combine with a di
   } finally {
     await app.close();
     removeDir(second);
+  }
+});
+
+test('arguments.all still fails closed without a workspace allowlist', async () => {
+  const app = await fixture({ emptyAllowlist: true });
+  try {
+    const response = await app.subscribe({ arguments: { all: true } });
+    assert.equal(response.error?.code, -32602);
+    assert.match(response.error?.message ?? '', /workspace allowlist required/);
+    assert.equal(app.requests.length, 0);
+    assert.equal(app.daemon.calls.filter((call) => call.method === 'event.subscribe').length, 0);
+  } finally {
+    await app.close();
   }
 });
 

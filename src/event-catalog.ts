@@ -25,7 +25,7 @@ const directoryFilter = {
     all: {
       type: 'boolean',
       description:
-        'Watch every allowed workspace. This is the default when directory is omitted, and cannot be combined with directory.',
+        'Watch every allowed workspace. This is the default when directory is omitted, and cannot be combined with directory. false is treated as omitted.',
     },
   },
   additionalProperties: false,

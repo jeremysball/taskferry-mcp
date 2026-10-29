@@ -32,6 +32,7 @@ const INITIALIZE = {
 const WORKER_BINDS = ['skills/searching-the-web', 'skills/using-chhoto'];
 const CONTROLLER_BINDS = ['skills', 'fleet-skills', 'plugins/cache'];
 const SUMMARY_METHOD = 'task.summary';
+const FOREIGN_PREFIX = 'tf-list-foreign-';
 const bindsUnder = (root: string, relative: readonly string[]) =>
   relative.map((entry) => path.join(root, entry));
 
@@ -546,11 +547,12 @@ test('rejects arbitrary daemon methods and invalid tool arguments', async () => 
 });
 
 test('cross-workspace status, result and summary are denied before content is requested', async () => {
+  const foreign = tempDir('tf-foreign-workspace-');
   const daemon = await stubDaemon((req) =>
     okReply(
       req,
       req.method === TASK_STATUS
-        ? { id: req.params.taskId, directory: FOREIGN_WORKSPACE, status: 'done' }
+        ? { id: req.params.taskId, directory: foreign, status: 'done' }
         : { message: 'SECRET' },
     ),
   );
@@ -559,7 +561,9 @@ test('cross-workspace status, result and summary are denied before content is re
     for (const name of [STATUS_TOOL, 'taskferry_result', 'taskferry_summary']) {
       const response = await call(bridge.url, toolCall(name, { taskId: 'foreign-task' }));
       assert.equal(response.result?.isError, true);
-      assert.doesNotMatch(JSON.stringify(response), /SECRET|private\/other-project/);
+      const text = response.result?.content?.[0]?.text ?? '';
+      assert.ok(!text.includes('SECRET'));
+      assert.ok(!text.includes(foreign));
     }
     assert.deepEqual(
       daemon.calls.map((c) => c.method),
@@ -568,24 +572,29 @@ test('cross-workspace status, result and summary are denied before content is re
   } finally {
     await bridge.close();
     await daemon.close();
+    removeDir(foreign);
   }
 });
 
 test('list without a directory shows only rows inside allowed workspaces', async () => {
+  const foreign = tempDir(FOREIGN_PREFIX);
   let root = '';
+  let sibling = '';
   const daemon = await stubDaemon((req) =>
     okReply(req, {
       counts: { queued: 0, running: 0, done: 3, crashed: 0, cancelled: 0, unknown: 0 },
       tasks: [
         { id: 'inside', status: 'done', directory: root },
         { id: 'nested', status: 'done', directory: `${root}/child` },
-        { id: 'sibling-prefix', status: 'done', directory: `${root}-sibling` },
-        { id: 'outside', status: 'done', directory: FOREIGN_WORKSPACE },
+        { id: 'sibling-prefix', status: 'done', directory: sibling },
+        { id: 'outside', status: 'done', directory: foreign },
       ],
     }),
   );
   root = daemon.dir;
+  sibling = `${root}-sibling`;
   mkdirSync(`${root}/child`);
+  mkdirSync(sibling);
   const bridge = await startBridge(daemon.socket, { allowDirectories: [daemon.dir] });
   try {
     const res = await call(bridge.url, toolCall('taskferry_list'));
@@ -601,28 +610,33 @@ test('list without a directory shows only rows inside allowed workspaces', async
   } finally {
     await bridge.close();
     await daemon.close();
+    removeDir(foreign);
+    removeDir(sibling);
   }
 });
 
 test('list all: true is an explicit fleet-wide request and cannot combine with directory', async () => {
+  const second = tempDir('tf-list-second-');
+  const foreign = tempDir(FOREIGN_PREFIX);
   let root = '';
   const daemon = await stubDaemon((req) =>
     okReply(req, {
       tasks: [
         { id: 'inside', status: 'done', directory: root },
-        { id: 'outside', status: 'done', directory: FOREIGN_WORKSPACE },
+        { id: 'second-root', status: 'done', directory: second },
+        { id: 'outside', status: 'done', directory: foreign },
       ],
     }),
   );
   root = daemon.dir;
-  const bridge = await startBridge(daemon.socket, { allowDirectories: [daemon.dir] });
+  const bridge = await startBridge(daemon.socket, { allowDirectories: [root, second] });
   try {
     const response = await call(bridge.url, toolCall('taskferry_list', { all: true }));
     assert.notEqual(response.result?.isError, true);
     const body = JSON.parse(response.result?.content?.[0]?.text ?? '{}');
     assert.deepEqual(
       body.tasks.map((task: { id: string }) => task.id),
-      ['inside'],
+      ['inside', 'second-root'],
     );
     assert.equal(daemon.calls.length, 1);
     assert.deepEqual(daemon.calls[0]?.params, {});
@@ -637,6 +651,22 @@ test('list all: true is an explicit fleet-wide request and cannot combine with d
       /all cannot be combined with directory/,
     );
     assert.equal(daemon.calls.length, 1, 'a combined request must not reach the daemon');
+  } finally {
+    await bridge.close();
+    await daemon.close();
+    removeDir(second);
+    removeDir(foreign);
+  }
+});
+
+test('list all: true still fails closed without a workspace allowlist', async () => {
+  const daemon = await stubDaemon((req) => okReply(req, { tasks: [] }));
+  const bridge = await startBridge(daemon.socket);
+  try {
+    const response = await call(bridge.url, toolCall('taskferry_list', { all: true }));
+    assert.equal(response.result?.isError, true);
+    assert.match(response.result?.content?.[0]?.text ?? '', /workspace allowlist required/);
+    assert.equal(daemon.calls.length, 0);
   } finally {
     await bridge.close();
     await daemon.close();
@@ -902,6 +932,7 @@ test('an empty scoped task list sentinel becomes an empty array', async () => {
 
 test('a multi-root list uses one all-tasks request and filters every root', async () => {
   const second = tempDir('tf-second-');
+  const foreign = tempDir(FOREIGN_PREFIX);
   let root = '';
   const daemon = await stubDaemon((req) =>
     okReply(req, {
@@ -909,7 +940,7 @@ test('a multi-root list uses one all-tasks request and filters every root', asyn
         { id: 'root-row', directory: root, status: 'done' },
         { id: 'nested-row', directory: `${root}/nested`, status: 'done' },
         { id: 'second-row', directory: second, status: 'done' },
-        { id: 'foreign-row', directory: '/private/other', status: 'done' },
+        { id: 'foreign-row', directory: foreign, status: 'done' },
       ],
     }),
   );
@@ -931,11 +962,13 @@ test('a multi-root list uses one all-tasks request and filters every root', asyn
     await bridge.close();
     await daemon.close();
     removeDir(second);
+    removeDir(foreign);
   }
 });
 
 test('one all-tasks response deduplicates visible rows and reports the daemon row cap', async () => {
   const second = tempDir('tf-second-');
+  const foreign = tempDir(FOREIGN_PREFIX);
   const daemon = await stubDaemon((req) =>
     okReply(req, {
       tasks: [
@@ -943,7 +976,7 @@ test('one all-tasks response deduplicates visible rows and reports the daemon ro
         { id: 'visible', directory: second, status: 'done' },
         ...Array.from({ length: 498 }, (_, i) => ({
           id: `foreign-${i}`,
-          directory: '/private/foreign',
+          directory: foreign,
           status: 'done',
         })),
       ],
@@ -965,6 +998,7 @@ test('one all-tasks response deduplicates visible rows and reports the daemon ro
     await bridge.close();
     await daemon.close();
     removeDir(second);
+    removeDir(foreign);
   }
 });
 

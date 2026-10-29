@@ -268,7 +268,7 @@ export function registerTools(server: McpServer, scope: ToolScope, deps: Partial
     'taskferry_list',
     {
       description:
-        'List recent tasks across all allowed workspaces, newest first, capped at 500 rows. With no arguments it lists every allowed workspace. Pass directory to scope the list to one allowed workspace, or all: true to request every allowed workspace explicitly; all cannot be combined with directory. Each row carries id, status, model, startedAt, directory and failureReason; use taskferry_status for full lifecycle and log fields.',
+        'List recent tasks across all allowed workspaces, newest first, capped at 500 rows. With no arguments it lists every allowed workspace. Pass directory to scope the list to one allowed workspace, or all: true to request every allowed workspace explicitly; all cannot be combined with directory, and all: false is treated as omitted. Each row carries id, status, model, startedAt, directory and failureReason; use taskferry_status for full lifecycle and log fields.',
       inputSchema: listArgs,
       annotations: READ_ONLY,
     },

@@ -115,7 +115,7 @@ Three events are exposed, and only these:
 | `task.failed`    | `crashed`, `unknown` |
 | `task.cancelled` | `cancelled`          |
 
-TaskFerry has no input-needed state, so the bridge does not advertise an input-needed event. The optional `arguments.directory` filter limits a subscription to one workspace subtree. `arguments.all: true` explicitly requests every configured allowed workspace, which is also the default when `directory` is omitted; `all` and `directory` cannot be combined. Either way, the bridge checks each event's directory against the configured workspace allowlist before delivery. `delivery` is `{ "mode": "webhook", "url": "https://...", "secret": "whsec_..." }`; `ttlMs` defaults to seven days, and `null` means no expiry.
+TaskFerry has no input-needed state, so the bridge does not advertise an input-needed event. The optional `arguments.directory` filter limits a subscription to one workspace subtree. `arguments.all: true` explicitly requests every configured allowed workspace, which is also the default when `directory` is omitted; `all` and `directory` cannot be combined, and `all: false` is treated as omitted. Either way, the bridge checks each event's directory against the configured workspace allowlist before delivery. `delivery` is `{ "mode": "webhook", "url": "https://...", "secret": "whsec_..." }`; `ttlMs` defaults to seven days, and `null` means no expiry.
 
 A subscription is stored only after the callback endpoint proves control of the URL. The bridge sends a Standard Webhooks-signed `{"type":"verification","challenge":"..."}` request and requires the exact challenge back; failures return JSON-RPC `-32015` with a categorized `data.reason`. OpenAI's current guide uses `-32015` (`CallbackEndpointError`); the newer MCP events draft uses `-32027`, so a future client may report that difference. Verification succeeds before any subscription is persisted or activated.
 
@@ -131,7 +131,7 @@ Subscriptions survive a restart in a private JSON state file (`0600`, parent `07
 
 `taskferry_status`, `taskferry_result` and `taskferry_summary` read `task.status` and check the canonical `directory` against the allowed roots before they return status, request result content or queue a summary. A missing or unresolvable directory fails closed. The root check is `inAllowedRoot` in `src/scope.ts`; the scoped status read is `inScopeStatus` in `src/tools-shared.ts`.
 
-`taskferry_list` without a directory asks the daemon for its newest 500 tasks through the existing `task.list {}` all-workspaces request and filters the rows through the same allowed roots. Passing a directory scopes the list to that workspace, which must itself be under an allowed root. `all: true` is the explicit form of the default fleet-wide request and cannot be combined with `directory`.
+`taskferry_list` without a directory asks the daemon for its newest 500 tasks through the existing `task.list {}` all-workspaces request and filters the rows through the same allowed roots. Passing a directory scopes the list to that workspace, which must itself be under an allowed root. `all: true` is the explicit form of the default fleet-wide request and cannot be combined with `directory`; `all: false` is treated as omitted.
 
 An unknown task ID and an out-of-scope one both answer "task not accessible", which keeps a caller from probing IDs outside its roots. A live pass confirmed that mapping against the running daemon.
 
