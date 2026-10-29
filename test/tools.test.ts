@@ -31,6 +31,7 @@ const INITIALIZE = {
 
 const WORKER_BINDS = ['skills/searching-the-web', 'skills/using-chhoto'];
 const CONTROLLER_BINDS = ['skills', 'fleet-skills', 'plugins/cache'];
+const SUMMARY_METHOD = 'task.summary';
 const bindsUnder = (root: string, relative: readonly string[]) =>
   relative.map((entry) => path.join(root, entry));
 
@@ -678,13 +679,52 @@ test('summary is scoped and forwards its mode and word budget', async () => {
     assert.notEqual(res.result?.isError, true);
     assert.deepEqual(
       daemon.calls.map((c) => c.method),
-      [TASK_STATUS, 'task.summary'],
+      [TASK_STATUS, SUMMARY_METHOD],
     );
     assert.deepEqual(daemon.calls[1]?.params, {
       taskId: 'mine',
       mode: 'activity',
       maxWords: 75,
     });
+  } finally {
+    await bridge.close();
+    await daemon.close();
+  }
+});
+
+test('task.summary gets the summary budget while ordinary calls keep the daemon timeout', async () => {
+  let root = '';
+  const daemon = await stubDaemon((req) => {
+    let result: unknown;
+    if (req.method === TASK_STATUS) {
+      result = { id: req.params.taskId, directory: root, status: 'done' };
+    } else if (req.method === SUMMARY_METHOD) {
+      result = { summaryTask: { id: 'summary-1', status: 'queued' } };
+    } else {
+      result = { message: 'DONE' };
+    }
+    const payload = okReply(req, result);
+    if (req.method !== SUMMARY_METHOD && req.method !== 'task.result') return payload;
+    // Hold the reply head open for 150 ms without writing bytes: past the
+    // ordinary 40 ms daemon budget but under the summary budget.
+    return [payload.slice(0, 1), ...Array(150).fill(''), payload.slice(1)];
+  });
+  root = daemon.dir;
+  const bridge = await startBridge(daemon.socket, {
+    allowDirectories: [daemon.dir],
+    daemonTimeoutMs: 40,
+    summaryTimeoutMs: 1000,
+  });
+  try {
+    const summary = await call(bridge.url, toolCall('taskferry_summary', { taskId: 'mine' }));
+    assert.notEqual(summary.result?.isError, true);
+    assert.deepEqual(JSON.parse(summary.result?.content?.[0]?.text ?? '{}'), {
+      summaryTask: { id: 'summary-1', status: 'queued' },
+    });
+
+    const result = await call(bridge.url, toolCall('taskferry_result', { taskId: 'mine' }));
+    assert.equal(result.result?.isError, true);
+    assert.match(result.result?.content?.[0]?.text ?? '', /daemon timeout/);
   } finally {
     await bridge.close();
     await daemon.close();
