@@ -26,7 +26,9 @@ export const DEFAULT_LIMITS = {
   daemonTimeoutMs: 5000,
   // A summary RPC can synchronously launch and poll a summarizer child for up
   // to 45 s (TaskFerry MAX_WAIT_MS), so it cannot share the ordinary 5 s
-  // socket budget. Keep this above the daemon's wait plus capture overhead.
+  // socket budget. Keep this above one poll plus capture overhead; a deployment
+  // that exercises the stale-session continuation retry (a second 45 s poll)
+  // should raise summaryTimeoutMs.
   summaryTimeoutMs: 60000,
   listTimeoutMs: 15000,
   modelsCacheTtlMs: 60000,

@@ -302,7 +302,7 @@ export function registerTools(server: McpServer, scope: ToolScope, deps: Partial
     'taskferry_summary',
     {
       description:
-        'Create a bounded summary task for a task. Returns a queued summary task id in summaryTask; poll taskferry_status then taskferry_result on that id. mode report (default) queues a summarizer. mode activity returns the activity snapshot and may synchronously launch and wait for a summarizer child, so it can take tens of seconds.',
+        'Summarize a task. mode report (the default) queues a bounded summarizer and returns a queued summary task id in summaryTask; poll taskferry_status then taskferry_result on that id. mode activity returns the activity snapshot directly and may synchronously launch and wait for a summarizer child, so it can take tens of seconds.',
       inputSchema: summaryArgs,
       annotations: WRITES,
     },

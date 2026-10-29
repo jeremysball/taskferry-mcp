@@ -35,7 +35,7 @@ directly.
 
 ## Run tests
 
-`mise run check` runs the full gate: format check, lint, the TypeScript split check, `tsc --noEmit`, and 148 unit tests. CI runs the same steps. `npm test` runs only the tests.
+`mise run check` runs the full gate: format check, lint, the TypeScript split check, `tsc --noEmit`, and 149 unit tests. CI runs the same steps. `npm test` runs only the tests.
 
 The tests start a real stub daemon on a Unix socket and real HTTP listeners on loopback. Two mutation probes are kept in the evidence directory: disabling the scope guard fails the cross-workspace test, and loosening the socket mode fails the permissions test.
 
@@ -77,7 +77,7 @@ Each setting resolves as flag, then environment variable, then config-file key, 
 
 `--config` and `TASKFERRY_MCP_CONFIG` name a config file; the default is `$XDG_CONFIG_HOME/taskferry-mcp/config.json`. Directory lists split on `:`, model lists on `,`, and caller and server bind lists on `:`.
 
-The timeout and preview knobs bound a slow call and a large response. `daemonTimeoutMs` is the per-call daemon socket timeout; `summaryTimeoutMs` is the longer budget for `task.summary`, which can synchronously wait for a summarizer child; `listTimeoutMs` bounds the `opencode models` catalog command; `modelsCacheTtlMs` is how long that catalog is cached; `previewChars` is the unconfirmed `taskferry_message` preview length. Every other call, including `task.status`, keeps the ordinary `daemonTimeoutMs`.
+The timeout and preview knobs bound a slow call and a large response. `daemonTimeoutMs` is the per-call daemon socket timeout; `summaryTimeoutMs` is the longer budget for `task.summary`, which can synchronously wait for a summarizer child; `listTimeoutMs` bounds the `opencode models` catalog command; `modelsCacheTtlMs` is how long that catalog is cached; `previewChars` is the unconfirmed `taskferry_message` preview length. Every other daemon call defaults to `daemonTimeoutMs`, including `task.status` and `task.result`; `task.accept` and `task.reject` deliberately use six times it to outlast the check gate.
 
 The bridge bearer token comes from `TASKFERRY_MCP_TOKEN` or a token file, never both. The gateway token comes from `TASKFERRY_GATEWAY_TOKEN` or `TASKFERRY_GATEWAY_TOKEN_FILE`; configuring one enables the gateway surface. A token file must not be readable by group or others, and an empty one is refused. A token set but blank is a configuration error, not a disabled surface. The bridge and gateway tokens must differ. Tokens are not flags or config keys, because both leak through `ps`, backups, and diffs.
 
@@ -135,7 +135,7 @@ Subscriptions survive a restart in a private JSON state file (`0600`, parent `07
 
 An unknown task ID and an out-of-scope one both answer "task not accessible", which keeps a caller from probing IDs outside its roots. A live pass confirmed that mapping against the running daemon.
 
-`taskferry_result` accepts `fields` to select result fields and `full` to return the complete narration. `taskferry_summary` wraps `task.summary`: it returns a queued summary task in `summaryTask`, and the caller polls `taskferry_status` and reads `taskferry_result` against that id. `mode: "report"` (the default) queues a summarizer. `mode: "activity"` returns an activity snapshot, but it is not a free cache read: the daemon force-refreshes and can synchronously launch and wait for a summarizer child, so it may take tens of seconds. The bridge gives `task.summary` the `summaryTimeoutMs` budget (60 seconds by default) rather than the ordinary 5 second daemon timeout.
+`taskferry_result` accepts `fields` to select result fields and `full` to return the complete narration. `taskferry_summary` wraps `task.summary`. `mode: "report"` (the default) queues a summarizer and returns a queued summary task in `summaryTask`; the caller polls `taskferry_status` and reads `taskferry_result` against that id. `mode: "activity"` returns the activity snapshot directly, but it is not a free cache read: the daemon force-refreshes and can synchronously launch and wait for a summarizer child, so it may take tens of seconds, and a stale-session continuation retry can poll a second child. The bridge gives `task.summary` the `summaryTimeoutMs` budget (60 seconds by default) rather than the ordinary 5 second daemon timeout.
 
 `taskferry_models` shells out to `opencode models` and caches the result for 60 seconds (`modelsCacheTtlMs`). Without a query it returns the allowlisted model ids only. With a query it searches the full installed catalog and marks each match as allowed or not. `missingAllowedModels` names allowlisted ids that are not installed, which catches an OpenCode allowlist typo before a dispatch fails. The allowlist is executor-agnostic and the catalog command is always OpenCode, even when a dispatch selects Kilo; all three executors take the same `provider/model` id, so a Kilo-only model still has to be added to the allowlist by hand and `missingAllowedModels` is advisory for it.
 

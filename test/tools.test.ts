@@ -705,28 +705,46 @@ test('task.summary gets the summary budget while ordinary calls keep the daemon 
     }
     const payload = okReply(req, result);
     if (req.method !== SUMMARY_METHOD && req.method !== 'task.result') return payload;
-    // Hold the reply head open for 150 ms without writing bytes: past the
-    // ordinary 40 ms daemon budget but under the summary budget.
-    return [payload.slice(0, 1), ...Array(150).fill(''), payload.slice(1)];
+    // Hold the reply head open for 300 ms without writing bytes: past the
+    // ordinary 100 ms daemon budget but under the 1 s summary budget.
+    return [payload.slice(0, 1), ...Array(300).fill(''), payload.slice(1)];
   });
   root = daemon.dir;
-  const bridge = await startBridge(daemon.socket, {
-    allowDirectories: [daemon.dir],
-    daemonTimeoutMs: 40,
-    summaryTimeoutMs: 1000,
-  });
   try {
-    const summary = await call(bridge.url, toolCall('taskferry_summary', { taskId: 'mine' }));
-    assert.notEqual(summary.result?.isError, true);
-    assert.deepEqual(JSON.parse(summary.result?.content?.[0]?.text ?? '{}'), {
-      summaryTask: { id: 'summary-1', status: 'queued' },
+    const bridge = await startBridge(daemon.socket, {
+      allowDirectories: [daemon.dir],
+      daemonTimeoutMs: 100,
+      summaryTimeoutMs: 1000,
     });
+    try {
+      const summary = await call(bridge.url, toolCall('taskferry_summary', { taskId: 'mine' }));
+      assert.notEqual(summary.result?.isError, true);
+      assert.deepEqual(JSON.parse(summary.result?.content?.[0]?.text ?? '{}'), {
+        summaryTask: { id: 'summary-1', status: 'queued' },
+      });
 
-    const result = await call(bridge.url, toolCall('taskferry_result', { taskId: 'mine' }));
-    assert.equal(result.result?.isError, true);
-    assert.match(result.result?.content?.[0]?.text ?? '', /daemon timeout/);
+      const result = await call(bridge.url, toolCall('taskferry_result', { taskId: 'mine' }));
+      assert.equal(result.result?.isError, true);
+      assert.match(result.result?.content?.[0]?.text ?? '', /daemon timeout/);
+    } finally {
+      await bridge.close();
+    }
+
+    // A summary budget below the delay must time out, proving the handler
+    // reads the configured knob instead of a hardcoded 60 s default.
+    const strict = await startBridge(daemon.socket, {
+      allowDirectories: [daemon.dir],
+      daemonTimeoutMs: 1000,
+      summaryTimeoutMs: 100,
+    });
+    try {
+      const summary = await call(strict.url, toolCall('taskferry_summary', { taskId: 'mine' }));
+      assert.equal(summary.result?.isError, true);
+      assert.match(summary.result?.content?.[0]?.text ?? '', /daemon timeout/);
+    } finally {
+      await strict.close();
+    }
   } finally {
-    await bridge.close();
     await daemon.close();
   }
 });
