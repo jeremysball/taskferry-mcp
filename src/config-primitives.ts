@@ -55,6 +55,7 @@ export const FILE_KEYS = [
   'gatewayTokenFile',
   'eventsStatePath',
   'daemonTimeoutMs',
+  'summaryTimeoutMs',
   'listTimeoutMs',
   'modelsCacheTtlMs',
   'previewChars',
