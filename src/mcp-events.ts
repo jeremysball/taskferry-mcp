@@ -99,6 +99,17 @@ function directoryArgument(directory: unknown): Json {
   return { directory: path.normalize(directory) };
 }
 
+function validateEventArguments(args: Record<string, unknown>) {
+  const unknown = Object.keys(args).find((key) => key !== 'directory' && key !== 'all');
+  if (unknown) throw invalidParams(`unknown argument "${unknown}"`);
+  if (args.all !== undefined && typeof args.all !== 'boolean') {
+    throw invalidParams('arguments.all must be a boolean');
+  }
+  if (args.all === true && args.directory !== undefined) {
+    throw invalidParams('arguments.all cannot be combined with arguments.directory');
+  }
+}
+
 export class EventService {
   private readonly config: BridgeConfig;
   private readonly store: SubscriptionStore;
@@ -282,9 +293,13 @@ export class EventService {
   private argumentsSync(value: Record<string, unknown> | undefined, scope: ToolScope): Json {
     if (value !== undefined && !isRecord(value)) throw invalidParams('arguments must be an object');
     const args = value ?? {};
-    const unknown = Object.keys(args).find((key) => key !== 'directory');
-    if (unknown) throw invalidParams(`unknown argument "${unknown}"`);
+    validateEventArguments(args);
     if (!scope.allowDirectories.length) throw invalidParams('workspace allowlist required');
+    // `all: true` is the MCP event equivalent of `watch --all`: every allowed
+    // workspace, with the workspace allowlist still applied to each event. It
+    // is the same filter as omitting directory, so store one canonical form
+    // and let repeated subscribe/unsubscribe calls share an identity.
+    if (args.all === true) return {};
     return directoryArgument(args.directory);
   }
 

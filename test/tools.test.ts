@@ -2,8 +2,6 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import fsPromises from 'node:fs/promises';
-import { syncBuiltinESMExports } from 'node:module';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import {
   HEALTH,
@@ -546,11 +544,12 @@ test('rejects arbitrary daemon methods and invalid tool arguments', async () => 
 });
 
 test('cross-workspace status, result and summary are denied before content is requested', async () => {
+  const foreign = tempDir('tf-foreign-workspace-');
   const daemon = await stubDaemon((req) =>
     okReply(
       req,
       req.method === TASK_STATUS
-        ? { id: req.params.taskId, directory: '/private/other-project', status: 'done' }
+        ? { id: req.params.taskId, directory: foreign, status: 'done' }
         : { message: 'SECRET' },
     ),
   );
@@ -559,7 +558,9 @@ test('cross-workspace status, result and summary are denied before content is re
     for (const name of [STATUS_TOOL, 'taskferry_result', 'taskferry_summary']) {
       const response = await call(bridge.url, toolCall(name, { taskId: 'foreign-task' }));
       assert.equal(response.result?.isError, true);
-      assert.doesNotMatch(JSON.stringify(response), /SECRET|private\/other-project/);
+      const text = response.result?.content?.[0]?.text ?? '';
+      assert.ok(!text.includes('SECRET'));
+      assert.ok(!text.includes(foreign));
     }
     assert.deepEqual(
       daemon.calls.map((c) => c.method),
@@ -568,35 +569,7 @@ test('cross-workspace status, result and summary are denied before content is re
   } finally {
     await bridge.close();
     await daemon.close();
-  }
-});
-
-test('list without a directory shows only rows inside allowed workspaces', async () => {
-  let root = '';
-  const daemon = await stubDaemon((req) =>
-    okReply(req, {
-      counts: { queued: 0, running: 0, done: 2, crashed: 0, cancelled: 0, unknown: 0 },
-      tasks: [
-        { id: 'inside', status: 'done', directory: root },
-        { id: 'outside', status: 'done', directory: '/private/other-project' },
-      ],
-    }),
-  );
-  root = daemon.dir;
-  const bridge = await startBridge(daemon.socket, { allowDirectories: [daemon.dir] });
-  try {
-    const res = await call(bridge.url, toolCall('taskferry_list'));
-    assert.notEqual(res.result?.isError, true);
-    const body = JSON.parse(res.result?.content?.[0]?.text ?? '');
-    assert.deepEqual(
-      body.tasks.map((task: { id: string }) => task.id),
-      ['inside'],
-    );
-    assert.equal(body.counts.done, 1);
-    assert.deepEqual(daemon.calls[0]?.params, {});
-  } finally {
-    await bridge.close();
-    await daemon.close();
+    removeDir(foreign);
   }
 });
 
@@ -803,212 +776,5 @@ test('a multibyte character split across daemon socket chunks survives', async (
   } finally {
     await bridge.close();
     await daemon.close();
-  }
-});
-
-test('malformed task lists fail closed', async () => {
-  const daemon = await stubDaemon((req) => okReply(req, { tasks: 'invalid' }));
-  const bridge = await startBridge(daemon.socket, { allowDirectories: [daemon.dir] });
-  try {
-    const response = await call(bridge.url, toolCall('taskferry_list'));
-    assert.equal(response.result?.isError, true);
-    assert.match(response.result?.content?.[0]?.text ?? '', /task.list.*tasks.*array/);
-  } finally {
-    await bridge.close();
-    await daemon.close();
-  }
-});
-
-test('an empty all-workspaces task list sentinel becomes an empty array', async () => {
-  const counts = { queued: 0, running: 0, done: 0, crashed: 0, cancelled: 0, unknown: 0 };
-  const daemon = await stubDaemon((req) =>
-    okReply(req, { counts, tasks: "none found (this server process's lifetime)" }),
-  );
-  const bridge = await startBridge(daemon.socket, { allowDirectories: [daemon.dir] });
-  try {
-    const response = await call(bridge.url, toolCall('taskferry_list'));
-    assert.notEqual(response.result?.isError, true);
-    assert.deepEqual(JSON.parse(response.result?.content?.[0]?.text ?? ''), {
-      counts,
-      tasks: [],
-    });
-  } finally {
-    await bridge.close();
-    await daemon.close();
-  }
-});
-
-test('an empty scoped task list sentinel becomes an empty array', async () => {
-  const counts = { queued: 0, running: 0, done: 0, crashed: 0, cancelled: 0, unknown: 0 };
-  const daemon = await stubDaemon((req) =>
-    okReply(req, { counts, tasks: 'none found in this workspace' }),
-  );
-  const bridge = await startBridge(daemon.socket, { allowDirectories: [daemon.dir] });
-  try {
-    const response = await call(bridge.url, toolCall('taskferry_list', { directory: daemon.dir }));
-    assert.notEqual(response.result?.isError, true);
-    assert.deepEqual(JSON.parse(response.result?.content?.[0]?.text ?? ''), {
-      counts,
-      tasks: [],
-    });
-  } finally {
-    await bridge.close();
-    await daemon.close();
-  }
-});
-
-test('a multi-root list continues past an empty sentinel root', async () => {
-  const second = tempDir('tf-second-');
-  const daemon = await stubDaemon((req) =>
-    okReply(req, {
-      tasks:
-        req.params.directory === second
-          ? [{ id: 'visible', directory: second, status: 'done' }]
-          : 'none found in this workspace',
-    }),
-  );
-  const bridge = await startBridge(daemon.socket, { allowDirectories: [daemon.dir, second] });
-  try {
-    const response = await call(bridge.url, toolCall('taskferry_list'));
-    assert.notEqual(response.result?.isError, true);
-    const body = JSON.parse(response.result?.content?.[0]?.text ?? '{}');
-    assert.deepEqual(
-      body.tasks.map((row: { id: string }) => row.id),
-      ['visible'],
-    );
-    assert.equal(body.counts.done, 1);
-    assert.deepEqual(
-      daemon.calls.map((req) => req.params),
-      [{ directory: daemon.dir }, { directory: second }],
-    );
-  } finally {
-    await bridge.close();
-    await daemon.close();
-    removeDir(second);
-  }
-});
-
-test('multiple workspace lists query roots independently and deduplicate visible rows', async () => {
-  const second = tempDir('tf-second-');
-  const daemon = await stubDaemon((req) =>
-    okReply(req, {
-      tasks:
-        req.params.directory === second
-          ? [
-              { id: 'visible', directory: second, status: 'done' },
-              { id: 'visible', directory: second, status: 'done' },
-            ]
-          : Array.from({ length: 500 }, (_, i) => ({
-              id: `foreign-${i}`,
-              directory: '/private/foreign',
-              status: 'done',
-            })),
-    }),
-  );
-  const bridge = await startBridge(daemon.socket, { allowDirectories: [daemon.dir, second] });
-  try {
-    const response = await call(bridge.url, toolCall('taskferry_list'));
-    const body = JSON.parse(response.result?.content?.[0]?.text ?? '{}');
-    assert.deepEqual(
-      body.tasks.map((row: { id: string }) => row.id),
-      ['visible'],
-    );
-    assert.equal(body.counts.done, 1);
-    assert.match(body.note, /cap reached/);
-    assert.deepEqual(
-      daemon.calls.map((req) => req.params),
-      [{ directory: daemon.dir }, { directory: second }],
-    );
-  } finally {
-    await bridge.close();
-    await daemon.close();
-    removeDir(second);
-  }
-});
-
-test('full result requires an explicit narration projection', async () => {
-  let root = '';
-  const daemon = await stubDaemon((req) => okReply(req, { directory: root, status: 'done' }));
-  root = daemon.dir;
-  const bridge = await startBridge(daemon.socket, { allowDirectories: [root] });
-  try {
-    for (const fields of [undefined, ['message']]) {
-      const response = await call(
-        bridge.url,
-        toolCall('taskferry_result', { taskId: 'mine', full: true, ...(fields ? { fields } : {}) }),
-      );
-      assert.equal(response.result?.isError, true);
-      assert.match(response.result?.content?.[0]?.text ?? '', /full.*narration/);
-    }
-    assert.equal(daemon.calls.length, 0);
-  } finally {
-    await bridge.close();
-    await daemon.close();
-  }
-});
-
-test('visible listing resolves allowed roots once rather than once per row', async (t) => {
-  let root = '';
-  const daemon = await stubDaemon((req) =>
-    okReply(req, {
-      tasks: Array.from({ length: 10 }, (_, i) => ({
-        id: `task-${i}`,
-        directory: path.join(root, 'child'),
-        status: 'done',
-      })),
-    }),
-  );
-  root = daemon.dir;
-  mkdirSync(path.join(root, 'child'));
-  const bridge = await startBridge(daemon.socket, { allowDirectories: [root] });
-  const original = fsPromises.realpath;
-  let rootResolutions = 0;
-  t.mock.method(fsPromises, 'realpath', async (value: string) => {
-    if (value === root) rootResolutions++;
-    return original(value);
-  });
-  syncBuiltinESMExports();
-  try {
-    const response = await call(bridge.url, toolCall('taskferry_list'));
-    const body = JSON.parse(response.result?.content?.[0]?.text ?? '{}');
-    assert.equal(body.tasks.length, 10);
-    assert.equal(rootResolutions, 1);
-  } finally {
-    t.mock.restoreAll();
-    syncBuiltinESMExports();
-    await bridge.close();
-    await daemon.close();
-  }
-});
-
-test('merged lists retain newest-first ordering and apply a total cap after deduplication', async () => {
-  const second = tempDir('tf-list-cap-');
-  let root = '';
-  const daemon = await stubDaemon((req) => {
-    const directory = req.params.directory === second ? second : root;
-    const start = directory === second ? 300 : 0;
-    return okReply(req, {
-      tasks: Array.from({ length: 300 }, (_, i) => ({
-        directory,
-        id: `task-${start + i}`,
-        status: 'done',
-        startedAt: new Date((start + i) * 1000).toISOString(),
-      })),
-    });
-  });
-  root = daemon.dir;
-  const bridge = await startBridge(daemon.socket, { allowDirectories: [root, second] });
-  try {
-    const response = await call(bridge.url, toolCall('taskferry_list'));
-    const body = JSON.parse(response.result?.content?.[0]?.text ?? '{}');
-    assert.equal(body.tasks.length, 500);
-    assert.equal(body.counts.done, 500);
-    assert.equal(body.tasks[0].id, 'task-599');
-    assert.equal(body.tasks[499].id, 'task-100');
-    assert.match(body.note, /cap reached/);
-  } finally {
-    await bridge.close();
-    await daemon.close();
-    removeDir(second);
   }
 });

@@ -140,20 +140,30 @@ async function visibleList(results: unknown[], roots: readonly string[]) {
   };
 }
 
-async function listTasks(args: { directory?: string }, scope: ToolScope) {
+type ListArgs = { directory?: string; all?: boolean };
+
+async function listTasks(args: ListArgs, scope: ToolScope) {
   if (!scope.allowDirectories.length) throw new Error(ALLOWLIST_REQUIRED);
+  if (args.all === true && args.directory !== undefined) {
+    throw new Error('all cannot be combined with directory');
+  }
   const roots = await resolveRoots(scope.allowDirectories);
-  if (args.directory === undefined) {
-    const params =
-      scope.allowDirectories.length > 1 ? roots.map((directory) => ({ directory })) : [{}];
-    const results = await Promise.all(
-      params.map((params) => callDaemon(scope, 'task.list', params)),
-    );
-    return visibleList(results, roots);
+  if (args.all === true || args.directory === undefined) {
+    // `task.list {}` is the daemon's existing `--all` mode: one request over
+    // the whole recorded history. Filtering those rows through the allowed
+    // roots preserves workspace authorization and still covers tasks nested
+    // below an allowed root. Do not enumerate roots into directory requests:
+    // that fragments history, misses nested tasks the daemon would return,
+    // and is not the RPC's all-tasks semantics.
+    return visibleList([await callDaemon(scope, 'task.list', {})], roots);
   }
   const real = await assertAllowedDirectory(args.directory, scope, roots);
   return taskListResult(await callDaemon(scope, 'task.list', { directory: real }));
 }
+const listArgs = z.strictObject({
+  directory: nonBlank.optional(),
+  all: z.boolean().optional(),
+});
 
 type ModelArgs = { query?: string; limit?: number };
 
@@ -258,8 +268,8 @@ export function registerTools(server: McpServer, scope: ToolScope, deps: Partial
     'taskferry_list',
     {
       description:
-        'List recent tasks across all allowed workspaces, newest first, capped at 500 rows. Pass directory to scope the list to one allowed workspace. Each row carries id, status, model, startedAt, directory and failureReason; use taskferry_status for full lifecycle and log fields.',
-      inputSchema: z.strictObject({ directory: nonBlank.optional() }),
+        'List recent tasks across all allowed workspaces, newest first, capped at 500 rows. With no arguments it lists every allowed workspace. Pass directory to scope the list to one allowed workspace, or all: true to request every allowed workspace explicitly; all cannot be combined with directory, and all: false is treated as omitted. Each row carries id, status, model, startedAt, directory and failureReason; use taskferry_status for full lifecycle and log fields.',
+      inputSchema: listArgs,
       annotations: READ_ONLY,
     },
     async (args) => asText(await listTasks(args, scope)),

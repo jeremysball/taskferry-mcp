@@ -121,11 +121,14 @@ returns `tasks: []`.
 normalizes the two known sentinels (`none found in this workspace` and
 `none found (this server process's lifetime)`) to an empty array in
 `taskListResult` in `src/tools.ts`. Returning the string would violate the
-tool's array contract and make one empty allowed root break a multi-root list.
+tool's array contract and abort the single all-workspaces response before its
+rows are filtered through the allowed roots.
 
 **Becomes a bug if:** a new sentinel string appears and the bridge fails closed
-instead of listing the other roots, or a malformed `tasks` value is accepted as
-empty.
+instead of treating that response as empty, or a malformed `tasks` value is
+accepted as empty. The daemon caps an all-workspaces response at its newest 500
+rows, so a busy foreign workspace can push older allowed-workspace rows out;
+that deliberately matches CLI `list --all` and is reported by the row-cap note.
 
 ## Tool failures come back as HTTP 200
 

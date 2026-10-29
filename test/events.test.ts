@@ -32,6 +32,7 @@ const PROTOCOL_VERSION = '2026-07-28';
 const COMPLETED = 'task.completed';
 const FAILED = 'task.failed';
 const CANCELLED = 'task.cancelled';
+const DONE = 'done';
 
 function modernRpc(method: string, params: Record<string, unknown> = {}) {
   const name = typeof params.name === 'string' ? params.name : undefined;
@@ -105,9 +106,17 @@ function eventBodies(requests: readonly CallbackRequest[]) {
     .filter((body) => body.type !== 'verification');
 }
 
-async function fixture() {
+type FixtureOptions = {
+  extraWorkspaces?: readonly string[];
+  emptyAllowlist?: boolean;
+};
+
+async function fixture({ extraWorkspaces = [], emptyAllowlist = false }: FixtureOptions = {}) {
   const workspace = realpathSync(tempDir('tf-events-workspace-'));
   const stateDir = tempDir('tf-events-state-');
+  const allowDirectories = emptyAllowlist
+    ? []
+    : [workspace, ...extraWorkspaces.map((dir) => realpathSync(dir))];
   const daemon = await stubDaemon((request) =>
     okReply(
       request,
@@ -124,8 +133,8 @@ async function fixture() {
     return handler(request);
   };
   const config = bridgeConfig({
+    allowDirectories,
     daemonSocket: daemon.socket,
-    allowDirectories: [workspace],
     eventsStatePath: path.join(stateDir, 'events.json'),
   });
   const events = new EventService(config, {
@@ -195,12 +204,18 @@ test('server/discover advertises events and the 2026-07-28 protocol version', as
     assert.ok(result.capabilities.tools);
 
     const listed = await app.invoke('events/list');
-    const events = listed.result?.events as { name: string; delivery: string[] }[];
+    const events = listed.result?.events as {
+      name: string;
+      delivery: string[];
+      inputSchema: { properties: Record<string, { type: string }> };
+    }[];
     assert.deepEqual(
       events.map((entry) => entry.name),
       [COMPLETED, FAILED, CANCELLED],
     );
     assert.ok(events.every((entry) => entry.delivery.includes('webhook')));
+    assert.equal(events[0]?.inputSchema.properties.directory?.type, 'string');
+    assert.equal(events[0]?.inputSchema.properties.all?.type, 'boolean');
   } finally {
     await app.close();
   }
@@ -341,6 +356,84 @@ test('a directory argument narrows delivery to that workspace subtree', async ()
     await app.events.ingest(taskState('task-in', 'done', appDir, 2));
     await waitFor(() => eventBodies(app.requests).length === 1, 'filtered event');
     assert.equal((eventBodies(app.requests)[0].data as { taskId: string }).taskId, 'task-in');
+  } finally {
+    await app.close();
+  }
+});
+
+test('arguments.all watches every allowed workspace and cannot combine with a directory', async () => {
+  const second = tempDir('tf-events-second-');
+  const app = await fixture({ extraWorkspaces: [second] });
+  try {
+    app.setHandler(mixedReply);
+    const response = await app.subscribe({ arguments: { all: true } });
+    assert.ok(response.result, JSON.stringify(response.error));
+
+    const outside = path.join(app.stateDir, 'outside-workspace');
+    mkdirSync(outside);
+    await app.events.ingest(taskState('task-primary', DONE, app.workspace, 1));
+    await app.events.ingest(taskState('task-other-root', DONE, realpathSync(second), 2));
+    await app.events.ingest(taskState('task-outside', DONE, outside, 3));
+    await waitFor(() => eventBodies(app.requests).length === 2, 'one event per allowed root');
+    assert.deepEqual(
+      eventBodies(app.requests).map((body) => (body.data as { taskId: string }).taskId),
+      ['task-primary', 'task-other-root'],
+    );
+
+    const combined = await app.subscribe({
+      arguments: { all: true, directory: app.workspace },
+    });
+    assert.equal(combined.error?.code, -32602);
+    assert.match(combined.error?.message ?? '', /cannot be combined/);
+
+    const wrongType = await app.subscribe({ arguments: { all: 'yes' } });
+    assert.equal(wrongType.error?.code, -32602);
+    assert.match(wrongType.error?.message ?? '', /arguments\.all must be a boolean/);
+  } finally {
+    await app.close();
+    removeDir(second);
+  }
+});
+
+test('arguments.all still fails closed without a workspace allowlist', async () => {
+  const app = await fixture({ emptyAllowlist: true });
+  try {
+    const response = await app.subscribe({ arguments: { all: true } });
+    assert.equal(response.error?.code, -32602);
+    assert.match(response.error?.message ?? '', /workspace allowlist required/);
+    assert.equal(app.requests.length, 0);
+    assert.equal(app.daemon.calls.filter((call) => call.method === 'event.subscribe').length, 0);
+  } finally {
+    await app.close();
+  }
+});
+
+test('all: true shares the default subscription identity and unsubscribe removes it', async () => {
+  const app = await fixture();
+  try {
+    app.setHandler(mixedReply);
+    const implicit = await app.subscribe();
+    const explicit = await app.subscribe({ arguments: { all: true } });
+    assert.ok(implicit.result, JSON.stringify(implicit.error));
+    assert.ok(explicit.result, JSON.stringify(explicit.error));
+    assert.equal(
+      (explicit.result as { id: string }).id,
+      (implicit.result as { id: string }).id,
+      'all: true is the same filter as omitting directory',
+    );
+    assert.equal(app.requests.length, 1, 'the equivalent filter must not re-challenge');
+
+    const removed = await app.invoke('events/unsubscribe', {
+      name: COMPLETED,
+      arguments: { all: true },
+      delivery: { mode: 'webhook', url: CALLBACK },
+    });
+    assert.ok(removed.result, JSON.stringify(removed.error));
+
+    app.setHandler(eventReply);
+    await app.events.ingest(taskState('task-after-unsubscribe', 'done', app.workspace, 1));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(eventBodies(app.requests).length, 0);
   } finally {
     await app.close();
   }
