@@ -20,7 +20,12 @@ const directoryFilter = {
     directory: {
       type: 'string',
       description:
-        'Absolute workspace directory to watch. Matches tasks dispatched there or below. Omit to watch every allowed workspace.',
+        'Absolute workspace directory to watch. Matches tasks dispatched there or below. Cannot be combined with all.',
+    },
+    all: {
+      type: 'boolean',
+      description:
+        'Watch every allowed workspace. This is the default when directory is omitted, and cannot be combined with directory.',
     },
   },
   additionalProperties: false,
