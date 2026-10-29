@@ -24,6 +24,10 @@ export type Listen = { kind: 'unix'; path: string } | { kind: 'tcp'; port: numbe
 
 export const DEFAULT_LIMITS = {
   daemonTimeoutMs: 5000,
+  // A summary RPC can synchronously launch and poll a summarizer child for up
+  // to 45 s (TaskFerry MAX_WAIT_MS), so it cannot share the ordinary 5 s
+  // socket budget. Keep this above the daemon's wait plus capture overhead.
+  summaryTimeoutMs: 60000,
   listTimeoutMs: 15000,
   modelsCacheTtlMs: 60000,
   previewChars: 500,
@@ -67,6 +71,7 @@ const FLAGS = {
   'gateway-port': { type: 'string' },
   'gateway-token-file': { type: 'string' },
   'daemon-timeout-ms': { type: 'string' },
+  'summary-timeout-ms': { type: 'string' },
   'list-timeout-ms': { type: 'string' },
   'models-cache-ttl-ms': { type: 'string' },
   'preview-chars': { type: 'string' },
@@ -328,6 +333,12 @@ function resolveLimits(flags: ReturnType<typeof parseFlags>, env: Env, file: Fil
       'daemon-timeout-ms',
       'TASKFERRY_MCP_DAEMON_TIMEOUT_MS',
       DEFAULT_LIMITS.daemonTimeoutMs,
+    ),
+    summaryTimeoutMs: limit(
+      'summaryTimeoutMs',
+      'summary-timeout-ms',
+      'TASKFERRY_MCP_SUMMARY_TIMEOUT_MS',
+      DEFAULT_LIMITS.summaryTimeoutMs,
     ),
     listTimeoutMs: limit(
       'listTimeoutMs',

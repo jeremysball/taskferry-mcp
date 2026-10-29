@@ -71,6 +71,7 @@ test('precedence is flag over env over config key over default, for every knob',
       listTimeoutMs: 102,
       modelsCacheTtlMs: 103,
       previewChars: 104,
+      summaryTimeoutMs: 105,
       daemonSocket: '/from/file.sock',
       allowedDirectories: ['/file-a', '/file-b'],
       allowedModels: ['file-model'],
@@ -87,8 +88,9 @@ test('precedence is flag over env over config key over default, for every knob',
         fromFile.listTimeoutMs,
         fromFile.modelsCacheTtlMs,
         fromFile.previewChars,
+        fromFile.summaryTimeoutMs,
       ],
-      [101, 102, 103, 104],
+      [101, 102, 103, 104, 105],
     );
     assert.equal(fromFile.daemonSocket, '/from/file.sock');
     assert.deepEqual(fromFile.allowDirectories, ['/file-a', '/file-b']);
@@ -104,6 +106,7 @@ test('precedence is flag over env over config key over default, for every knob',
       TASKFERRY_MCP_LIST_TIMEOUT_MS: '202',
       TASKFERRY_MCP_MODELS_CACHE_TTL_MS: '203',
       TASKFERRY_MCP_PREVIEW_CHARS: '204',
+      TASKFERRY_MCP_SUMMARY_TIMEOUT_MS: '205',
       TASKFERRY_SOCKET_PATH: '/from/env.sock',
       TASKFERRY_ALLOWED_DIRECTORIES: '/env-a:/env-b',
       TASKFERRY_ALLOWED_MODELS: 'env-1,env-2',
@@ -120,8 +123,9 @@ test('precedence is flag over env over config key over default, for every knob',
         fromEnv.listTimeoutMs,
         fromEnv.modelsCacheTtlMs,
         fromEnv.previewChars,
+        fromEnv.summaryTimeoutMs,
       ],
-      [201, 202, 203, 204],
+      [201, 202, 203, 204, 205],
     );
     assert.equal(fromEnv.daemonSocket, '/from/env.sock');
     assert.deepEqual(fromEnv.allowDirectories, ['/env-a', '/env-b']);
@@ -144,6 +148,8 @@ test('precedence is flag over env over config key over default, for every knob',
         '303',
         '--preview-chars',
         '304',
+        '--summary-timeout-ms',
+        '305',
         '--daemon-socket',
         '/from/flag.sock',
         '--allowed-directories',
@@ -170,8 +176,9 @@ test('precedence is flag over env over config key over default, for every knob',
         fromFlag.listTimeoutMs,
         fromFlag.modelsCacheTtlMs,
         fromFlag.previewChars,
+        fromFlag.summaryTimeoutMs,
       ],
-      [301, 302, 303, 304],
+      [301, 302, 303, 304, 305],
     );
     assert.deepEqual(fromFlag.allowDirectories, ['/flag-a']);
     assert.deepEqual(fromFlag.allowModels, ['flag-1']);
@@ -486,14 +493,21 @@ test('computed socket defaults require absolute runtime paths', () => {
 test('limit defaults and invalid positive integers', () => {
   const config = resolve();
   assert.deepEqual(
-    [config.daemonTimeoutMs, config.listTimeoutMs, config.modelsCacheTtlMs, config.previewChars],
-    [5000, 15000, 60000, 500],
+    [
+      config.daemonTimeoutMs,
+      config.listTimeoutMs,
+      config.modelsCacheTtlMs,
+      config.previewChars,
+      config.summaryTimeoutMs,
+    ],
+    [5000, 15000, 60000, 500, 60000],
   );
   for (const flag of [
     '--daemon-timeout-ms',
     '--list-timeout-ms',
     '--models-cache-ttl-ms',
     '--preview-chars',
+    '--summary-timeout-ms',
   ]) {
     for (const value of ['0', '-1', '1.5', 'no', '9007199254740992']) {
       assert.throws(() => resolve([flag, value]), ConfigError);

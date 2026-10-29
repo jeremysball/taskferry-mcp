@@ -144,12 +144,13 @@ async function listTasks(args: { directory?: string }, scope: ToolScope) {
   if (!scope.allowDirectories.length) throw new Error(ALLOWLIST_REQUIRED);
   const roots = await resolveRoots(scope.allowDirectories);
   if (args.directory === undefined) {
-    const params =
-      scope.allowDirectories.length > 1 ? roots.map((directory) => ({ directory })) : [{}];
-    const results = await Promise.all(
-      params.map((params) => callDaemon(scope, 'task.list', params)),
-    );
-    return visibleList(results, roots);
+    // `task.list {}` is the daemon's existing `--all` mode: one request over
+    // the whole recorded history. Filtering those rows through the allowed
+    // roots preserves workspace authorization and still covers tasks nested
+    // below an allowed root. Do not enumerate roots into directory requests:
+    // that fragments history, misses nested tasks the daemon would return,
+    // and is not the RPC's all-tasks semantics.
+    return visibleList([await callDaemon(scope, 'task.list', {})], roots);
   }
   const real = await assertAllowedDirectory(args.directory, scope, roots);
   return taskListResult(await callDaemon(scope, 'task.list', { directory: real }));
@@ -199,11 +200,16 @@ type SummaryArgs = { taskId: string; mode?: 'report' | 'activity'; maxWords?: nu
 
 async function summarize(args: SummaryArgs, scope: ToolScope) {
   await inScopeStatus(args.taskId, scope);
-  return callDaemon(scope, 'task.summary', {
-    taskId: args.taskId,
-    ...(args.mode === undefined ? {} : { mode: args.mode }),
-    ...(args.maxWords === undefined ? {} : { maxWords: args.maxWords }),
-  });
+  return callDaemon(
+    scope,
+    'task.summary',
+    {
+      taskId: args.taskId,
+      ...(args.mode === undefined ? {} : { mode: args.mode }),
+      ...(args.maxWords === undefined ? {} : { maxWords: args.maxWords }),
+    },
+    scope.limits.summaryTimeoutMs,
+  );
 }
 
 type DispatchArgs = {
@@ -297,7 +303,7 @@ export function registerTools(server: McpServer, scope: ToolScope, deps: Partial
     'taskferry_summary',
     {
       description:
-        'Create a bounded summary task for a task. Returns a queued summary task id in summaryTask; poll taskferry_status then taskferry_result on that id. mode activity reads cached activity without spawning; report (default) queues a summarizer.',
+        'Create a bounded summary task for a task. Returns a queued summary task id in summaryTask; poll taskferry_status then taskferry_result on that id. mode report (default) queues a summarizer. mode activity returns the activity snapshot and may synchronously launch and wait for a summarizer child, so it can take tens of seconds.',
       inputSchema: summaryArgs,
       annotations: WRITES,
     },
