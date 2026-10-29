@@ -28,6 +28,7 @@ export function buildToolScope(config: BridgeConfig): ToolScope {
     serverRoBinds: config.serverRoBinds,
     limits: {
       daemonTimeoutMs: config.daemonTimeoutMs ?? DEFAULT_LIMITS.daemonTimeoutMs,
+      summaryTimeoutMs: config.summaryTimeoutMs ?? DEFAULT_LIMITS.summaryTimeoutMs,
       listTimeoutMs: config.listTimeoutMs ?? DEFAULT_LIMITS.listTimeoutMs,
       modelsCacheTtlMs: config.modelsCacheTtlMs ?? DEFAULT_LIMITS.modelsCacheTtlMs,
       previewChars: config.previewChars ?? DEFAULT_LIMITS.previewChars,
