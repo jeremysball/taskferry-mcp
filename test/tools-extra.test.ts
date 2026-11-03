@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import net from 'node:net';
 import fs from 'node:fs';
@@ -287,6 +287,41 @@ test('UTF-8 paging advances even when the byte budget is smaller than a characte
     await daemon.close();
   }
 });
+
+test(
+  'worktree pages past 10 MB and uses the shared truncation result',
+  { timeout: 30_000 },
+  async () => {
+    let root = '';
+    const daemon = await stubDaemon((req) => statusFor(req, root));
+    root = daemon.dir;
+    const size = 12 * 1024 * 1024;
+    const file = path.join(root, 'large.bin');
+    writeFileSync(file, '');
+    truncateSync(file, size);
+    const bridge = await startBridge(daemon.socket, { allowDirectories: [root] });
+    try {
+      const response = await call(
+        bridge.url,
+        toolCall(WORKTREE_TOOL, {
+          taskId: TASK_ID,
+          path: 'large.bin',
+          offset: 10_000_000,
+          maxBytes: 1024 * 1024,
+        }),
+      );
+      const body = JSON.parse(response.result?.content?.[0]?.text ?? '{}');
+      assert.equal(body.offset, 10_000_000);
+      assert.equal(body.bytesRead, 1024 * 1024);
+      assert.equal(body.truncated, true);
+      assert.equal(body.nextOffset, 11_048_576);
+      assert.equal(body.size, size);
+    } finally {
+      await bridge.close();
+      await daemon.close();
+    }
+  },
+);
 
 test('worktree directory paging options explain that they apply only to files', async () => {
   let root = '';

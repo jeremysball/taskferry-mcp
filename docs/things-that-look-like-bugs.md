@@ -276,6 +276,64 @@ needs the target must have it inside the allowed workspace.
 **Becomes a bug if:** a file whose real path is genuinely inside the task
 directory is refused because an intermediate symlink was used.
 
+## `taskferry_files` reads outside every allowed workspace
+
+**Observe:** an authenticated caller on either the bridge or gateway surface
+can list and read `/etc` or any other absolute path through `taskferry_files`,
+even when `--allowed-directories` is empty or names an unrelated workspace.
+`taskferry_worktree` refuses the same path. A gateway token holder can also
+read a bridge token file or the process environment when the service user can
+read it.
+
+**Why:** this is a direct host-inspection surface for the MCP service user, not
+a task view. Authentication on either surface is the boundary and the service
+user's filesystem permissions still apply; adding the workspace allowlist would
+defeat the requested capability. The two tokens stay distinct at the HTTP layer
+but are not separate filesystem principals. The tool is read-only, and every
+other path-taking tool keeps its allowlist.
+
+**Becomes a bug if:** the tool gains a write path, becomes reachable without
+authentication, or an allowlist check makes it silently task-scoped again.
+An entry name that is not valid UTF-8 is decoded with U+FFFD for display, so
+two such names share a `name`; a directory page still keeps them distinct by
+reporting `nameBase64` and continuing with `nextAfterBase64` / `afterBase64`.
+The same raw bytes make that entry addressable as a path: pass `pathBase64`
+with the full absolute path instead of `path`. That UX is deliberate: the
+plain name remains readable, and the raw cursor is the exact one. It becomes a
+bug if a page boundary omits `nextAfterBase64` and one invalid-name sibling is
+unreachable, if a path visible in a listing cannot be opened by `pathBase64`,
+or if `after` silently re-reads an already returned sibling forever.
+
+## `taskferry_files` trusts a short read over a pseudo-file's stat size
+
+**Observe:** `/sys/class/net/lo/mtu` reports `size: 4096` but only six bytes
+are readable; `taskferry_files` returns those bytes with `truncated: false`
+and no `nextOffset`, instead of a continuation that fails on the next call.
+
+**Why:** sysfs attributes use `st_size` as a page-sized buffer hint, not the
+content length. `readWindow` treats a read that stops before the planned window
+as EOF, because a short read is the only reliable end-of-content signal. A page
+that still has bytes in the window but stops at `maxBytes` stays
+`truncated: true`, so ordinary file paging is unchanged.
+
+**Becomes a bug if:** a regular file whose content grows past its stat size
+loses the tail, or a page that stops at `maxBytes` reports `truncated: false`.
+
+## `taskferry_files` re-reads a seekless pseudo-file from the start
+
+**Observe:** `/proc/uptime` at `offset: 4` with a small `maxBytes` succeeds even
+though a read at offset 4 returns zero bytes.
+
+**Why:** some procfs attributes implement only sequential reads. When an offset
+read returns nothing, `readWindow` retries from the descriptor's current
+position (still zero because prior reads were positional) and discards the
+prefix, capped at 4 MiB. Without this, the second page failed with a misleading
+"file changed while reading" error.
+
+**Becomes a bug if:** the fallback hides a real truncation race on a regular
+file, or an offset beyond the 4 MiB cap silently returns wrong bytes instead of
+the existing retry error.
+
 ## `taskferry_accept` has no `force` argument
 
 **Observe:** `taskferry_accept` with `force: true` is rejected by the strict
@@ -298,9 +356,11 @@ caller's context. Paging with `offset` and `maxBytes` reads the rest; the 1 MiB
 hard cap bounds a single response.
 
 **Becomes a bug if:** a file smaller than `maxBytes` comes back truncated, or
-`offset` plus the reported `bytesRead` skips bytes. A worktree file page has no
-`nextOffset`: the caller advances `offset` by `bytesRead`. Directory listings
-are not byte slices at all; they cap at 500 entries and report `truncated`.
+`offset` plus the reported `bytesRead` skips bytes. A truncated page reports
+`nextOffset`; with `offset: 0` and a leading partial character that differs
+from `bytesRead`, so advance by `nextOffset` rather than adding `bytesRead`.
+Directory listings are not byte slices at all; they cap at 500 entries and
+report `truncated`.
 
 ## Message pages count characters; worktree pages count bytes
 
@@ -312,10 +372,12 @@ the two tools.
 **Why:** the message path is a text preview and slices the decoded string
 (`message.slice(offset, end)` in `src/tools-message.ts`), so a caller paging
 text never splits a character. The worktree path is a file slice
-(`readSync(fd, buffer, 0, length, start)` in `src/tools-worktree.ts`) and never
-decodes the rest of the file, so byte offsets are the only useful unit. A
-worktree directory listing is not paged at all: it caps at 500 entries and
-reports `truncated`, so there is no offset to continue from.
+(`readPage` and `readWindow` in `src/file-inspect.ts`, called by
+`src/tools-worktree.ts`) and never decodes the rest of the file, so byte
+offsets are the only useful unit. A worktree directory listing is not paged at
+all: it caps at 500 entries and reports `truncated`, so there is no offset to
+continue from. `taskferry_files` does page directories, with `after` /
+`nextAfter` (names) or `afterBase64` / `nextAfterBase64` (raw bytes).
 
 **Becomes a bug if:** one tool starts reporting the other's unit under the same
 field name.

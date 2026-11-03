@@ -511,7 +511,10 @@ test('unsubscribe removes the identity so later matching events are not delivere
 test('subscriptions survive a restart and deliver without a new subscribe call', async () => {
   const app = await fixture();
   try {
-    assert.ok((await app.subscribe()).result);
+    // The restarted service uses the real clock, so disable the TTL: the stored
+    // subscription is otherwise pinned to BASE_TIME plus seven days and this
+    // test starts failing once the wall clock passes that date.
+    assert.ok((await app.subscribe({ ttlMs: null })).result);
     app.setHandler(eventReply);
     await app.events.ingest(taskState('task-first', 'done', app.workspace, 1));
     await waitFor(() => eventBodies(app.requests).length === 1, 'first delivery');

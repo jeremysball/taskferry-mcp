@@ -16,6 +16,7 @@ import { registerEventMethods } from './event-methods.ts';
 import { EventService } from './mcp-events.ts';
 import { listenBridge, type Listener } from './listen.ts';
 import { registerChangesetTools } from './tools-changeset.ts';
+import { registerFilesTool } from './tools-files.ts';
 import { registerMessageTool } from './tools-message.ts';
 import { registerResumeTool } from './tools-resume.ts';
 import { registerTools, type ToolDeps } from './tools.ts';
@@ -40,6 +41,7 @@ taskferry_result accepts fields to select result fields and full to return the c
 taskferry_message reads a task final message without truncation: without confirm it returns only the length and a short preview; call again with confirm: true, using offset and limit to page a long message.
 taskferry_accept applies a pending changeset to its workspace; taskferry_reject refuses and discards it; taskferry_cancel stops a queued or running task. All three are scope-guarded and write-capable.
 taskferry_worktree lists or reads files inside a task dispatch directory, read-only, with paths confined to that directory.
+On both authenticated surfaces, taskferry_files lists a directory or reads a regular file at any absolute path the MCP process OS user can access. It is not task-scoped and does not use the workspace allowlist; authentication on either surface and the service user filesystem permissions are the boundary. Directory pages use after (entry name, exclusive) and maxEntries; file pages use offset (bytes) and maxBytes, and both report a precise continuation (nextAfter or nextOffset). A gateway token therefore carries the same host-read authority as the bridge token: if the bridge token file or process environment is readable by the service user, a gateway caller can read it. The tokens stay distinct at the HTTP layer but are not separate filesystem principals.
 Event subscriptions watch every allowed workspace by default; arguments.directory narrows one workspace subtree, and arguments.all: true states the fleet-wide default explicitly. The two cannot be combined.
 taskferry_resume continues a settled task's conversation: pass its taskId and a prompt, and the bridge reuses that task's workspace, model, session and executor. It refuses a queued or running task, or one without a session.
 taskferry_dispatch accepts variant to set the model reasoning level; omit it for the TaskFerry default.
@@ -67,6 +69,11 @@ function createServer(context: SurfaceContext) {
   registerTools(server, scope, context.deps);
   registerChangesetTools(server, scope);
   registerWorktreeTool(server, scope);
+  // Both authenticated surfaces expose the host-wide file view deliberately:
+  // the requirement is any authenticated MCP caller, bridge or gateway. A
+  // gateway token is therefore host-read authority too, including the bridge
+  // token file or process environment when the service user can read them.
+  registerFilesTool(server);
   registerMessageTool(server, scope);
   registerResumeTool(server, scope);
   registerEventMethods(server, context.events, context.principal, scope);

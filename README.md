@@ -12,30 +12,31 @@ The bridge is TypeScript run directly by Node's native type stripping, so there 
 
 ## Tools
 
-Thirteen tools. Eleven are hard-wired to one daemon method; `taskferry_models`
-runs the local `opencode models` command, and `taskferry_worktree` reads the
-task's dispatch directory locally. A caller cannot name a daemon method
-directly.
+Fourteen tools. Eleven are hard-wired to one daemon method; `taskferry_models`
+runs the local `opencode models` command, and `taskferry_worktree` and
+`taskferry_files` read the filesystem directly. A caller cannot name a daemon
+method directly.
 
-| Tool                 | Source            | Notes                                                                        |
-| -------------------- | ----------------- | ---------------------------------------------------------------------------- |
-| `taskferry_health`   | `system.health`   |                                                                              |
-| `taskferry_list`     | `task.list`       | All allowed workspaces by default; optional directory or all                 |
-| `taskferry_models`   | `opencode models` | Allowed ids, missing allowlist entries, optional query                       |
-| `taskferry_status`   | `task.status`     | Scope-guarded; full lifecycle fields                                         |
-| `taskferry_result`   | `task.result`     | Scope-guarded; optional `fields` and `full`                                  |
-| `taskferry_message`  | `task.result`     | Scope-guarded; final message, preview until `confirm: true`                  |
-| `taskferry_summary`  | `task.summary`    | Scope-guarded; queues a summary task                                         |
-| `taskferry_dispatch` | `task.dispatch`   | Needs both allowlists; optional `executor`, `variant`, `roBind`, `noSandbox` |
-| `taskferry_resume`   | `task.dispatch`   | Continues a settled task's session; derives workspace/model/executor         |
-| `taskferry_accept`   | `task.accept`     | Scope-guarded; applies a pending changeset                                   |
-| `taskferry_reject`   | `task.reject`     | Scope-guarded; refuses and discards a pending changeset                      |
-| `taskferry_cancel`   | `task.cancel`     | Scope-guarded; optional `graceMs`                                            |
-| `taskferry_worktree` | local filesystem  | Read-only view inside the task dispatch directory                            |
+| Tool                 | Source            | Notes                                                                               |
+| -------------------- | ----------------- | ----------------------------------------------------------------------------------- |
+| `taskferry_health`   | `system.health`   |                                                                                     |
+| `taskferry_list`     | `task.list`       | All allowed workspaces by default; optional directory or all                        |
+| `taskferry_models`   | `opencode models` | Allowed ids, missing allowlist entries, optional query                              |
+| `taskferry_status`   | `task.status`     | Scope-guarded; full lifecycle fields                                                |
+| `taskferry_result`   | `task.result`     | Scope-guarded; optional `fields` and `full`                                         |
+| `taskferry_message`  | `task.result`     | Scope-guarded; final message, preview until `confirm: true`                         |
+| `taskferry_summary`  | `task.summary`    | Scope-guarded; queues a summary task                                                |
+| `taskferry_dispatch` | `task.dispatch`   | Needs both allowlists; optional `executor`, `variant`, `roBind`, `noSandbox`        |
+| `taskferry_resume`   | `task.dispatch`   | Continues a settled task's session; derives workspace/model/executor                |
+| `taskferry_accept`   | `task.accept`     | Scope-guarded; applies a pending changeset                                          |
+| `taskferry_reject`   | `task.reject`     | Scope-guarded; refuses and discards a pending changeset                             |
+| `taskferry_cancel`   | `task.cancel`     | Scope-guarded; optional `graceMs`                                                   |
+| `taskferry_worktree` | local filesystem  | Read-only view inside the task dispatch directory                                   |
+| `taskferry_files`    | local filesystem  | Read-only list/read at any absolute path the service user can access; both surfaces |
 
 ## Run tests
 
-`mise run check` runs the full gate: format check, lint, the TypeScript split check, `tsc --noEmit`, and 154 unit tests. CI runs the same steps. `npm test` runs only the tests.
+`mise run check` runs the full gate: format check, lint, the TypeScript split check, `tsc --noEmit`, and 197 unit tests. CI runs the same steps. `npm test` runs only the tests.
 
 The tests start a real stub daemon on a Unix socket and real HTTP listeners on loopback. Two mutation probes are kept in the evidence directory: disabling the scope guard fails the cross-workspace test, and loosening the socket mode fails the permissions test.
 
@@ -101,7 +102,7 @@ export TASKFERRY_GATEWAY_TOKEN='separate-secret'
 npm start
 ```
 
-It listens on loopback TCP 8788 by default (`--gateway-port`, `TASKFERRY_GATEWAY_PORT`, or `gatewayPort` changes it) and serves the same tools with the gateway token instead of the MCP token. The bridge token is refused there, and the gateway token is refused on the bridge listener. The two tokens must differ, and the gateway port must differ from the bridge's TCP port. Like the bridge's TCP mode, it binds `127.0.0.1` only and refuses non-loopback `Host` or `Origin`; reaching it from elsewhere is the job of an authenticated proxy. Setting a gateway port without a token is a configuration error rather than an unauthenticated listener. The old standalone gateway's `TASKFERRY_UPSTREAM_URL` and `PORT` variables are not read; a leftover `TASKFERRY_UPSTREAM_URL` is a configuration error, and the port comes only from the knobs above. The surface is not separately deployable: a Sites-native handler and a real deployment still need the Sites runtime and API.
+It listens on loopback TCP 8788 by default (`--gateway-port`, `TASKFERRY_GATEWAY_PORT`, or `gatewayPort` changes it) and serves the same tools with the gateway token instead of the MCP token. That includes `taskferry_files`: a gateway token can read every host path the service user can read, including the bridge token file or process environment if either is readable, so the tokens are distinct HTTP credentials but not separate filesystem principals. The bridge token is refused there, and the gateway token is refused on the bridge listener. The two tokens must differ, and the gateway port must differ from the bridge's TCP port. Like the bridge's TCP mode, it binds `127.0.0.1` only and refuses non-loopback `Host` or `Origin`; reaching it from elsewhere is the job of an authenticated proxy. Setting a gateway port without a token is a configuration error rather than an unauthenticated listener. The old standalone gateway's `TASKFERRY_UPSTREAM_URL` and `PORT` variables are not read; a leftover `TASKFERRY_UPSTREAM_URL` is a configuration error, and the port comes only from the knobs above. The surface is not separately deployable: a Sites-native handler and a real deployment still need the Sites runtime and API.
 
 ## MCP Events webhooks
 
@@ -195,11 +196,75 @@ path it lists the dispatch directory; a directory path lists that directory; a
 file path returns its text. Every path is resolved with `realpathSync` and must
 stay inside the task directory, so `..`, absolute paths, and symlinks pointing
 outside are refused. A file read returns at most 256 KiB by default; pass
-`offset` and `maxBytes` to page by byte offset. The response reports `offset`,
-`bytesRead`, and `truncated`, so the next page starts at `offset + bytesRead`.
-Bytes that are not UTF-8 text come back with `binary: true` and no content.
-Directory listings are capped at 500 rows and are not paged, so a byte offset
-has no meaning there.
+`offset` and `maxBytes` to page by byte offset. `offset` has no upper cap, and
+a truncated page reports `nextOffset`. A page never ends inside a UTF-8
+character, and an offset inside one starts the page at that character with a
+note. The response reports `offset`, `bytesRead`, and `truncated`. Zero-size
+virtual files are read directly and flagged with `sizeUnknown`. Bytes that are
+not UTF-8 text come back with `binary: true` and no content. Directory
+listings are capped at 500 rows and are not paged, so a byte offset has no
+meaning there.
+
+## Any-path read/list view
+
+`taskferry_files` takes an absolute `path` (or `pathBase64`, the raw bytes of
+that path) and either lists a directory or reads a regular file. It is deliberately **not** task-scoped and does **not**
+use the workspace allowlist: the tool needs no task id, works when the
+allowlist is empty, and serves any path the MCP process OS user can access.
+Both authenticated MCP surfaces expose it, the bridge and the gateway.
+Authentication on either surface is the only bridge boundary, and ordinary
+filesystem permissions still apply. Symlinks are resolved to their target, so
+a link may point anywhere the service user can reach.
+
+A directory listing is sorted by name and paged with `after` (the last entry
+name from the previous page, exclusive) and `maxEntries` (default and maximum
+500); the response reports `total`, `returned`, `truncated`, and `nextAfter`.
+`offset` is file-only. Each page scans the directory once to keep exact name
+order and the exact `total`, so a very large directory costs time proportional
+to its entry count per page; the response itself stays bounded. Entry names
+are decoded as UTF-8 strings, so a name containing invalid UTF-8 bytes cannot
+be represented losslessly; such an entry carries `nameBase64`, and a page
+boundary on one reports `nextAfterBase64` instead of `nextAfter`. Pass that as
+`afterBase64` to continue without skipping or repeating a sibling whose decoded
+name collides. `nextAfterBase64` is reported alongside `nextAfter` whenever a
+page is truncated, so a client can always page by raw bytes. A path whose own
+name is not valid UTF-8 is addressable too: pass `pathBase64` with the raw
+absolute path bytes instead of `path`, and the same listing bytes that produce
+`nameBase64` become a readable path.
+
+A file read pages by byte `offset` and `maxBytes` (256 KiB default, 1 MiB
+maximum) and reports `bytesRead`, `truncated`, and `nextOffset`. There is no
+upper offset cap. A page never ends inside a UTF-8 character; if `maxBytes` is
+smaller than the next character, the page includes that whole character and
+can exceed `maxBytes` by up to 3 bytes. An explicit offset that lands inside a
+character starts the page at that character and adds a note, rather than
+silently skipping bytes. Binary files return `binary: true` with no content,
+and non-regular files (devices, FIFOs, sockets) return `kind: "other"` with
+metadata only, including a magic fd link such as `/proc/self/fd/1`. A short
+read before the planned window is treated as EOF even when the stat size is
+larger, which covers sysfs attributes that report a page-sized placeholder. A
+descriptor that rejects offset reads is retried from its start (at most 4 MiB
+into the file) and served as a slice, so seekless procfs entries page with a
+small `maxBytes`. Errors distinguish a missing path, a permission denial, a
+symlink loop, and a non-directory path.
+
+A gateway token is therefore host-read authority, not a narrower credential.
+The gateway token holder can read every path the service user can read,
+including a bridge token file or the process environment if either is readable.
+The two tokens remain distinct at the HTTP layer and each surface rejects the
+other's token, but they are not separate filesystem principals. Expose the
+gateway only to a client you would also trust with the bridge token.
+
+Pending overlay files are readable by their actual host paths, without
+applying them. `taskferry_status` reports `overlayDirs` (`root`, `upperDir`,
+`workDir`, and any per-bind overlay directories) while a changeset is pending.
+Pass `overlayDirs.upperDir` or a path beneath it to `taskferry_files` to read
+the pending copy; the workspace is untouched until `taskferry_accept` runs, and
+`taskferry_files` never calls the daemon or applies a changeset.
+
+This is intentionally broader than `taskferry_worktree`, which stays confined
+to a task's dispatch directory. The other write, dispatch, resume, changeset,
+message, result, and bind paths keep their existing allowlists.
 
 ## Full final message
 
@@ -217,9 +282,11 @@ walk the full message without confirming.
 
 - Real TaskFerry integration live passes cover health, list, status, result, message, worktree, summary, dispatch, and dispatched-task results. Changeset accept/reject and cancel are unit-tested against the stub only, because a live call would mutate a real workspace. Resume is covered by unit tests and a live pass that recalled a codeword from the source session. Queue behavior under load, concurrent clients, non-default executors, and very long summaries are still untested. Dispatch stays disabled until both allowlists are set, and read-only binds stay disabled until the bind allowlist is set.
 - MCP compatibility is verified against the official SDK client and raw JSON-RPC over HTTP. The bridge answers with JSON only, so a client that requires SSE or sessions will fail.
-- The suite has 154 cases and does not cover the B01-B18 matrix from the design plan, which is not in this repo.
+- The suite has 197 cases and does not cover the B01-B18 matrix from the design plan, which is not in this repo.
 - MCP Events are tested against a stub callback receiver, not a real ChatGPT registration or delivery. The bridge also exposes no public callback endpoint itself, so deployment reachability and OpenAI-side verification remain open gates. TaskFerry events have no replay, so a bridge restart or daemon disconnect loses the events in the gap by design.
 - Dispatch has no durable idempotency. Do not retry an ambiguous failure automatically.
+- `taskferry_files` is intentionally host-wide on both authenticated surfaces for the MCP process OS user: authentication and filesystem permissions are its only boundaries. A gateway token carries the same host-read authority as the bridge token, including the bridge token file or process environment when the service user can read it; the tokens are not separate filesystem principals. Do not expose either surface to a principal that should not read the host. The other tools keep their workspace, model, and bind allowlists.
+- `taskferry_files` resolves and stats a path before opening it, so a component replaced in between can open a different target; `O_NOFOLLOW` pins only the final component, and the reported `path` comes from `/proc/self/fd` or `/dev/fd` when available, falling back to the pre-open resolution. Binary detection is per page, so a page of valid UTF-8 without NUL bytes reads as text even when the rest of the file is binary. For zero-size virtual files an EOF probe decides `truncated`, and a failed probe conservatively reports `truncated: true`. A short read before the planned window is EOF even when the stat size is larger (sysfs pads `st_size` to a page), and a descriptor that rejects offset reads is retried sequentially with a 4 MiB cap. A path whose name is not valid UTF-8 is reachable by passing `pathBase64` with the raw absolute path bytes; `path` and `pathBase64` are mutually exclusive. A directory page scans every entry to keep exact name order and total, so its work grows with the directory size even though the response is bounded; entry names with invalid UTF-8 bytes are decoded lossily for `name`, but their raw bytes remain reachable through `nameBase64` and `nextAfterBase64` / `afterBase64`.
 - The gateway surface is part of the bridge process, not a prototype forwarder. A Sites-native handler and a real deployment still need the Sites runtime and API.
 - Validate input schemas, HTTP limits, authentication, dispatch restrictions, CSRF and origin posture, audit logging, secret rotation, and response truncation before production.
 
