@@ -1,5 +1,5 @@
 import { type Dirent, type Stats, constants } from 'node:fs';
-import { open, lstat, readdir, realpath, stat } from 'node:fs/promises';
+import { open, readdir, realpath, stat } from 'node:fs/promises';
 import { isUtf8 } from 'node:buffer';
 import path from 'node:path';
 import { McpServer } from '@modelcontextprotocol/server';
@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { type Json } from './daemon.ts';
 import { inResolvedRoot } from './scope.ts';
 import { errorCode } from './errors.ts';
+import { type FilePage, compareNames, entrySize, entryType, readPage } from './file-inspect.ts';
 import {
   READ_ONLY,
   asText,
@@ -19,7 +20,6 @@ import {
 const MAX_ENTRIES = 500;
 const DEFAULT_MAX_BYTES = 256 * 1024;
 const HARD_MAX_BYTES = 1024 * 1024;
-const MAX_OFFSET = 10_000_000;
 const DENIED_PREFIX = 'path denied';
 const DENIED_RELATIVE = 'path denied: must be relative to the task directory';
 const DENIED_OUTSIDE = 'path denied: outside the task directory';
@@ -29,12 +29,11 @@ const PATH_NOT_FOUND = 'path not found';
 const worktreeArgs = z.strictObject({
   taskId: nonBlank,
   path: nonBlank.max(4096).optional(),
-  offset: z.number().int().min(0).max(MAX_OFFSET).optional(),
+  offset: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
   maxBytes: z.number().int().min(1).max(HARD_MAX_BYTES).optional(),
 });
 
 type WorktreeArgs = z.infer<typeof worktreeArgs>;
-type EntryType = 'file' | 'directory' | 'symlink' | 'other';
 
 async function resolveTaskRoot(taskId: string, scope: ToolScope) {
   const current = (await inScopeStatus(taskId, scope)) as Json | null;
@@ -60,28 +59,6 @@ async function resolvePath(root: string, requested: string | undefined) {
   }
   if (!(await inResolvedRoot([root], target))) throw new Error(DENIED_OUTSIDE);
   return { target, relative: path.relative(root, target) || '.' };
-}
-
-function entryType(dirent: Dirent): EntryType {
-  if (dirent.isFile()) return 'file';
-  if (dirent.isDirectory()) return 'directory';
-  if (dirent.isSymbolicLink()) return 'symlink';
-  return 'other';
-}
-
-async function entrySize(fullPath: string, type: EntryType) {
-  if (type !== 'file' && type !== 'symlink') return undefined;
-  try {
-    return (await lstat(fullPath)).size;
-  } catch {
-    return undefined;
-  }
-}
-
-function compareNames(a: Dirent, b: Dirent) {
-  if (a.name < b.name) return -1;
-  if (a.name > b.name) return 1;
-  return 0;
 }
 
 async function listDirectory(taskId: string, root: string, target: string, relative: string) {
@@ -140,38 +117,45 @@ async function assertFdInside(root: string, fd: number) {
   throw new Error(PATH_UNAVAILABLE);
 }
 
-function characterBoundary(buffer: Buffer, index: number): { before: number; after: number } {
-  const continuation = (at: number) =>
-    at >= 0 && at < buffer.length && (buffer[at] & 0xc0) === 0x80;
-  if (!continuation(index)) return { before: index, after: index };
-  let before = index;
-  while (before > 0 && index - before < 3 && continuation(before)) before--;
-  let after = index;
-  while (after < buffer.length && after - before < 4 && continuation(after)) after++;
-  return isUtf8(buffer.subarray(before, after))
-    ? { before, after }
-    : { before: index, after: index };
+function worktreeFileNotes(page: FilePage, binary: boolean, bytesRead: number) {
+  const notes: string[] = [];
+  if (binary) notes.push('binary file; content omitted');
+  if (page.sizeUnknown && bytesRead > 0) {
+    notes.push('reported size is 0; read directly from the descriptor');
+  }
+  if (page.adjustedFrom !== undefined) {
+    notes.push(
+      `offset ${page.adjustedFrom} is inside a UTF-8 character; page starts at ${page.start}`,
+    );
+  }
+  return notes;
 }
 
-async function readPage(
-  file: Awaited<ReturnType<typeof open>>,
+function worktreeFileResult(
+  taskId: string,
+  root: string,
+  relative: string,
   size: number,
-  offset: number,
-  maxBytes: number,
+  page: FilePage,
 ) {
-  const requested = Math.min(offset, size);
-  const windowStart = Math.max(0, requested - 3);
-  // Look around both edges so a split character is not mistaken for binary data.
-  const buffer = Buffer.allocUnsafe(
-    Math.min(size - windowStart, requested - windowStart + maxBytes + 6),
-  );
-  const { bytesRead } = await file.read(buffer, 0, buffer.length, windowStart);
-  const window = buffer.subarray(0, bytesRead);
-  const start = characterBoundary(window, Math.min(requested - windowStart, bytesRead)).after;
-  const edge = characterBoundary(window, Math.min(start + maxBytes, bytesRead));
-  // A page smaller than one character still has to advance.
-  const end = edge.before > start ? edge.before : edge.after;
-  return { start: windowStart + start, chunk: window.subarray(start, end) };
+  const bytesRead = page.chunk.length;
+  const binary = page.chunk.includes(0) || !isUtf8(page.chunk);
+  const notes = worktreeFileNotes(page, binary, bytesRead);
+  return {
+    taskId,
+    directory: root,
+    path: relative,
+    kind: 'file',
+    size,
+    ...(page.sizeUnknown && bytesRead > 0 ? { sizeUnknown: true } : {}),
+    offset: page.start,
+    bytesRead,
+    truncated: page.truncated,
+    ...(page.truncated ? { nextOffset: page.start + bytesRead } : {}),
+    binary,
+    content: binary ? null : page.chunk.toString('utf8'),
+    ...(notes.length ? { note: notes.join('; ') } : {}),
+  };
 }
 
 async function readWorktreeFile(
@@ -197,25 +181,12 @@ async function readWorktreeFile(
         note: 'not a regular file',
       };
     }
-    const size = stat.size;
-    const { start, chunk } = await readPage(file, size, offset, maxBytes);
-    const bytesRead = chunk.length;
-    const binary = chunk.includes(0) || !isUtf8(chunk);
-    return {
-      taskId,
-      directory: root,
-      path: relative,
-      kind: 'file',
-      size,
-      offset: start,
-      bytesRead,
-      truncated: start + bytesRead < size,
-      binary,
-      content: binary ? null : chunk.toString('utf8'),
-      ...(binary ? { note: 'binary file; content omitted' } : {}),
-    };
+    const page = await readPage(file, stat.size, offset, maxBytes);
+    return worktreeFileResult(taskId, root, relative, stat.size, page);
   } catch (error) {
-    if (error instanceof Error && error.message.startsWith(DENIED_PREFIX)) throw error;
+    if (error instanceof Error && (error.message.startsWith(DENIED_PREFIX) || !errorCode(error))) {
+      throw error;
+    }
     throw new Error(PATH_UNAVAILABLE, { cause: error });
   } finally {
     await file.close();
@@ -261,7 +232,7 @@ export function registerWorktreeTool(server: McpServer, scope: ToolScope) {
     'taskferry_worktree',
     {
       description:
-        'Browse a task dispatch directory read-only. Omit path to list the root; a directory path lists that directory; a file path returns its text. Paths are relative and must stay inside the task directory after symlink resolution. Large files page with offset and maxBytes; binary files return metadata without content. This first reads task status to enforce the workspace allowlist.',
+        'Browse a task dispatch directory read-only. Omit path to list the root; a directory path lists that directory; a file path returns its text. Paths are relative and must stay inside the task directory after symlink resolution. Large files page with offset and maxBytes; offset has no upper cap, and a truncated page reports nextOffset. A page never ends inside a UTF-8 character. Binary files return metadata without content. Zero-size virtual files are read directly and flagged with sizeUnknown. This first reads task status to enforce the workspace allowlist.',
       inputSchema: worktreeArgs,
       annotations: READ_ONLY,
     },

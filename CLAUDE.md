@@ -23,17 +23,21 @@ HTTP MCP bridge to a local TaskFerry daemon. Validated once against a local Task
 - `src/tools-resume.ts`: `taskferry_resume`, the session follow-up tool.
 - `src/tools-message.ts`: `taskferry_message`, the confirmed full-message reader.
 - `src/tools-worktree.ts`: `taskferry_worktree`, the scoped read-only file viewer.
+- `src/tools-files.ts`: `taskferry_files`, the authenticated any-absolute-path read/list viewer on both the bridge and gateway surfaces; it deliberately bypasses the workspace allowlist, so keep it limited to reads.
+- `src/tools-files-schema.ts`: the strict `taskferry_files` argument schema, including the raw-byte `pathBase64` alternative.
+- `src/absolute-path.ts`: absolute-path validation, raw-byte decoding, and `realpath` resolution for the any-path viewer.
+- `src/file-inspect.ts`: shared directory-entry and UTF-8-safe file-page helpers used by both viewers.
 - `src/scope.ts`: allowed-root check for task directories.
 - `src/daemon.ts`: Unix socket client for the TaskFerry protocol.
 - `src/models.ts`: the `opencode models` catalog runner and its short-lived cache.
 - `src/errors.ts`: shared `ConfigError` and errno `code` reader for filesystem errors.
-- `test/http.test.ts`, `test/listen.test.ts`, `test/gateway.test.ts`, `test/surfaces.test.ts`, `test/tools.test.ts`, `test/tools-extra.test.ts`, `test/tools-resume.test.ts`, `test/config.test.ts`, `test/scope.test.ts`, `test/skills.test.ts`: tests against a stub daemon on a Unix socket and real loopback HTTP listeners.
+- `test/http.test.ts`, `test/listen.test.ts`, `test/gateway.test.ts`, `test/surfaces.test.ts`, `test/tools.test.ts`, `test/tools-extra.test.ts`, `test/tools-files.test.ts`, `test/file-inspect.test.ts`, `test/tools-resume.test.ts`, `test/config.test.ts`, `test/scope.test.ts`, `test/skills.test.ts`: tests against a stub daemon on a Unix socket and real loopback HTTP listeners.
 - `test/helpers.ts`: the stub daemon, bridge launcher, and MCP call helpers those tests share.
 - `docs/evidence/`: verbatim historical run logs. Do not edit them; `docs/evidence/README.md` explains what they are and which branch and commit each came from.
 
 ## Rules specific to this repo
 
 - The daemon wire protocol is owned by TaskFerry (`src/protocol.js` there: `{version: 1, id, method, params}` requests, `{version: 1, ok, id, result | error}` replies). Check that file, not this repo's stub daemon, when the two disagree.
-- Anything that touches a path from a caller must go through the allowlist and `realpathSync` checks in `src/scope.ts` and the tool modules. A new tool that forwards a caller-supplied directory or task ID needs a test that proves it is refused outside the allowed roots.
+- Anything that touches a path from a caller must go through the allowlist and `realpathSync` checks in `src/scope.ts` and the tool modules, except the deliberate `taskferry_files` read/list surface. That tool serves any absolute path the MCP process OS user can read, for any authenticated MCP caller on either the bridge or gateway surface, and is documented in `README.md`; a gateway token is therefore host-read authority, including the bridge token file or process environment when readable. It must not gain write, dispatch, or bind behavior. Any other new tool that forwards a caller-supplied directory or task ID needs a test that proves it is refused outside the allowed roots.
 - Pinned versions are exact. `typescript` stays on 6.x for eslint while `typescript-native` (7.x) runs `tsc`; `npm run check:typescript-split` says when to merge them (`docs/things-that-look-like-bugs.md`). Use `npm run typecheck`, not `npx tsc`.
 - Behavior a reader would call a bug but is deliberate goes in `docs/things-that-look-like-bugs.md` in the same change.
