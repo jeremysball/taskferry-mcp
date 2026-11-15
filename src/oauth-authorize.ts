@@ -80,15 +80,13 @@ async function authorizeTarget(
 ): Promise<Target | undefined> {
   const clientId = single(params, 'client_id');
   const redirectUri = single(params, 'redirect_uri');
-  const client = clientId ? await deps.resolveClient(clientId) : undefined;
-  if (
-    !client ||
-    !redirectUri ||
-    !client.redirectUris.includes(redirectUri) ||
-    !redirectAllowed(deps.config.redirects, redirectUri)
-  ) {
+  // Check the redirect before resolving the client: a disallowed or missing redirect can never
+  // be answered, so fetching a metadata document first would be network work for a 400.
+  if (!clientId || !redirectUri || !redirectAllowed(deps.config.redirects, redirectUri)) {
     return undefined;
   }
+  const client = await deps.resolveClient(clientId);
+  if (!client || !client.redirectUris.includes(redirectUri)) return undefined;
   return { client, redirectUri, state: single(params, 'state') };
 }
 
@@ -121,18 +119,14 @@ async function authorizeGet(deps: OAuthDeps, res: http.ServerResponse, params: U
       scope: parseScope(single(params, 'scope')) ?? [],
       resource: deps.config.resource,
     });
-    const redirectHost = new URL(redirectUri).host;
-    deps.log('consent_shown', { client_id: client.clientId, redirect_host: redirectHost });
-    return sendHtml(
-      res,
-      200,
-      renderConsent({
-        clientName: client.clientName,
-        clientIdHost: isClientIdUrl(client.clientId) ? new URL(client.clientId).host : undefined,
-        redirectHost,
-        requestId,
-      }),
-    );
+    const consent = consentView({
+      clientName: client.clientName,
+      clientId: client.clientId,
+      redirectUri,
+      requestId,
+    });
+    deps.log('consent_shown', { client_id: client.clientId, redirect_host: consent.redirectHost });
+    return sendHtml(res, 200, renderConsent(consent));
   } catch (error) {
     if (!(error instanceof StoreFullError)) throw error;
     return bounce(['temporarily_unavailable', 'too many sign-ins in progress; try again shortly']);
@@ -178,14 +172,36 @@ function wrongSecret(deps: OAuthDeps, res: http.ServerResponse, pending: Pending
   return sendHtml(
     res,
     403,
-    renderConsent({
-      clientName: pending.clientName,
-      clientIdHost: isClientIdUrl(pending.clientId) ? new URL(pending.clientId).host : undefined,
-      redirectHost: new URL(pending.redirectUri).host,
-      requestId: pending.id,
-      error: 'That is not the approval secret.',
-    }),
+    renderConsent(pendingConsent(pending, 'That is not the approval secret.')),
   );
+}
+
+// One description of the consent page: the client's name, where its id lives, and where the code
+// will be sent. Every render (first look, wrong secret, capacity refusal) goes through this.
+function consentView(fields: {
+  clientName: string;
+  clientId: string;
+  redirectUri: string;
+  requestId: string;
+  error?: string;
+}) {
+  return {
+    clientName: fields.clientName,
+    clientIdHost: isClientIdUrl(fields.clientId) ? new URL(fields.clientId).host : undefined,
+    redirectHost: new URL(fields.redirectUri).host,
+    requestId: fields.requestId,
+    ...(fields.error === undefined ? {} : { error: fields.error }),
+  };
+}
+
+function pendingConsent(pending: Pending, error?: string) {
+  return consentView({
+    clientName: pending.clientName,
+    clientId: pending.clientId,
+    redirectUri: pending.redirectUri,
+    requestId: pending.id,
+    error,
+  });
 }
 
 function approve(deps: OAuthDeps, res: http.ServerResponse, pending: Pending, secret: string) {
@@ -211,13 +227,7 @@ function approve(deps: OAuthDeps, res: http.ServerResponse, pending: Pending, se
     return sendHtml(
       res,
       503,
-      renderConsent({
-        clientName: pending.clientName,
-        clientIdHost: isClientIdUrl(pending.clientId) ? new URL(pending.clientId).host : undefined,
-        redirectHost: new URL(pending.redirectUri).host,
-        requestId: pending.id,
-        error: 'The server is busy. Try again shortly.',
-      }),
+      renderConsent(pendingConsent(pending, 'The server is busy. Try again shortly.')),
     );
   }
   deps.store.takePending(pending.id);

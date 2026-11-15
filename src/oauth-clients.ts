@@ -1,7 +1,7 @@
 import { isLoopbackHost, parseWebUrl, type RedirectRules } from './oauth-config.ts';
 
 const MAX_REDIRECT_URIS = 10;
-const MAX_URI_CHARS = 2048;
+export const MAX_REDIRECT_URI_CHARS = 2048;
 const MAX_NAME_CHARS = 100;
 const SUPPORTED_GRANTS = ['authorization_code', 'refresh_token'];
 const DEFAULT_NAME = 'Unnamed client';
@@ -50,7 +50,7 @@ function validRedirects(value: unknown, rules: RedirectRules): string[] | Regist
     return fail('invalid_redirect_uri', `redirect_uris must list 1 to ${MAX_REDIRECT_URIS} URIs`);
   }
   for (const uri of value) {
-    if (typeof uri !== 'string' || uri.length > MAX_URI_CHARS) {
+    if (typeof uri !== 'string' || uri.length > MAX_REDIRECT_URI_CHARS) {
       return fail('invalid_redirect_uri', 'every redirect URI must be a string of sane length');
     }
     if (!redirectAllowed(rules, uri)) {

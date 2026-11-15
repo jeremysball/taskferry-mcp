@@ -6,6 +6,7 @@ import { HEALTH, send, toolCall, type Sent } from './helpers.ts';
 
 const INVALID_REQUEST = 'invalid_request';
 const OTHER_RESOURCE = 'https://other.example.com/mcp';
+const FORM_TYPE = 'application/x-www-form-urlencoded';
 import {
   APPROVAL_SECRET,
   CLAUDE_CALLBACK,
@@ -372,6 +373,84 @@ test('token endpoint errors use the OAuth error codes', async () => {
   }
 });
 
+test('a repeated consent parameter is refused and leaves the request approvable', async () => {
+  const f = await oauthFixture();
+  try {
+    const clientId = await registerClient(f);
+    const { challenge } = pkce();
+    const page = await getPage(
+      authorizeUrl(f, {
+        client_id: clientId,
+        redirect_uri: CLAUDE_CALLBACK,
+        response_type: 'code',
+        code_challenge: challenge,
+        code_challenge_method: 'S256',
+        resource: f.oauth.resource,
+      }),
+    );
+    const id = requestId(page.text);
+    assert.ok(id);
+    const form = new URLSearchParams({
+      decision: 'approve',
+      request_id: id as string,
+      secret: APPROVAL_SECRET,
+    });
+    form.append('decision', 'deny');
+    const refused = await send(f.url(ROUTE.authorize), form.toString(), {
+      token: null,
+      headers: { 'content-type': FORM_TYPE },
+    });
+    assert.equal(refused.status, 400);
+
+    const decided = await postForm(f.url(ROUTE.authorize), {
+      decision: 'approve',
+      request_id: id as string,
+      secret: APPROVAL_SECRET,
+    });
+    assert.equal(decided.status, 302);
+    assert.ok(location(decided).searchParams.get('code'));
+  } finally {
+    await f.close();
+  }
+});
+
+test('repeated parameters on token and revocation are refused', async () => {
+  const f = await oauthFixture();
+  try {
+    const signIn = await approve(f);
+    const form = new URLSearchParams({
+      grant_type: 'authorization_code',
+      client_id: signIn.clientId,
+      code: signIn.code,
+      redirect_uri: signIn.redirectUri,
+      code_verifier: signIn.verifier,
+    });
+    form.append('code', 'a-second-code');
+    const refusedToken = await send(f.url(ROUTE.token), form.toString(), {
+      token: null,
+      headers: { 'content-type': FORM_TYPE },
+    });
+    assert.equal(refusedToken.status, 400);
+    assert.equal(json(refusedToken).error, INVALID_REQUEST);
+
+    const tokens = json(await exchange(f, signIn));
+    const revoke = new URLSearchParams({
+      token: tokens.refresh_token as string,
+      client_id: signIn.clientId,
+    });
+    revoke.append('token', 'a-second-token');
+    const refusedRevoke = await send(f.url(ROUTE.revoke), revoke.toString(), {
+      token: null,
+      headers: { 'content-type': FORM_TYPE },
+    });
+    assert.equal(refusedRevoke.status, 400);
+    assert.equal(json(refusedRevoke).error, INVALID_REQUEST);
+    assert.equal((await mcpHealth(f, tokens.access_token as string)).status, 200);
+  } finally {
+    await f.close();
+  }
+});
+
 test('revocation kills the grant, and always answers 200', async () => {
   const f = await oauthFixture();
   try {
@@ -473,7 +552,7 @@ test('a repeated token parameter is refused instead of treated as absent', async
       `${body}&resource=${encodeURIComponent(f.oauth.resource)}`,
       {
         token: null,
-        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        headers: { 'content-type': FORM_TYPE },
       },
     );
     assert.equal(sent.status, 400);

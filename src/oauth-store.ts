@@ -17,6 +17,7 @@ export const MAX_ACCESS = 1000;
 // Spent authorization codes are kept to detect replay; the cap keeps that table from growing
 // forever on a busy server.
 export const MAX_USED_CODES = 1000;
+const REFRESH_CAPACITY = 'refresh tokens';
 const STORE_VERSION = 1;
 
 export type Client = {
@@ -183,11 +184,6 @@ export class OAuthStore {
     );
   }
 
-  private save() {
-    this.prune();
-    this.persist();
-  }
-
   private prune() {
     const t = this.now();
     const live = <V extends { expiresAt: number }>(map: Map<string, V>) => {
@@ -292,18 +288,33 @@ export class OAuthStore {
       scope: input.scope,
       resource: input.resource,
     };
-    // Both caps are applied before anything is added, so a refusal leaves the store unchanged.
+    // Both caps are applied before anything is written, so a refusal leaves the store unchanged.
+    this.prune();
     this.evictRefresh();
     this.evictAccess();
-    this.access.set(hashToken(accessToken), { ...base, expiresAt: t + ACCESS_TTL_MS });
+    const refresh = new Map(this.refresh);
     const hash = hashToken(refreshToken);
-    this.refresh.set(hash, { ...base, hash, expiresAt: t + REFRESH_TTL_MS, rotated: false });
+    refresh.set(hash, { ...base, hash, expiresAt: t + REFRESH_TTL_MS, rotated: false });
+    const usedCodes = new Map(this.usedCodes);
     if (input.codeHash) {
-      this.evictUsedCodes();
-      this.usedCodes.set(input.codeHash, { familyId, expiresAt: t + REFRESH_TTL_MS });
+      this.evictUsedCodes(usedCodes);
+      usedCodes.set(input.codeHash, { familyId, expiresAt: t + REFRESH_TTL_MS });
     }
-    this.save();
+    // Durable first, like revokeFamily: a failed write leaves the presented grant unspent and
+    // every token from the previous state still valid.
+    this.persist(refresh.values(), usedCodes);
+    this.replace(this.refresh, refresh);
+    this.replace(this.usedCodes, usedCodes);
+    this.access.set(hashToken(accessToken), { ...base, expiresAt: t + ACCESS_TTL_MS });
     return { accessToken, refreshToken, expiresIn: ACCESS_TTL_MS / 1000, scope: input.scope };
+  }
+
+  // A new sign-in is refused before its authorization code is spent, so a full store does not
+  // burn a code the owner would have to obtain again.
+  assertNewGrantCapacity(): void {
+    this.prune();
+    if (this.refresh.size < MAX_REFRESH || this.rotatedRecord()) return;
+    throw new StoreFullError(REFRESH_CAPACITY);
   }
 
   // Keeps the refresh table under its cap by dropping already-rotated records, which only serve
@@ -311,10 +322,25 @@ export class OAuthStore {
   // retryable error rather than a token that silently stops working.
   private evictRefresh() {
     while (this.refresh.size >= MAX_REFRESH) {
-      const rotated = [...this.refresh.values()].find((r) => r.rotated);
-      if (!rotated) throw new StoreFullError('refresh tokens');
+      const rotated = this.rotatedRecord();
+      if (!rotated) throw new StoreFullError(REFRESH_CAPACITY);
       this.refresh.delete(rotated.hash);
     }
+  }
+
+  private rotatedRecord(): Refresh | undefined {
+    return [...this.refresh.values()].find((record) => record.rotated);
+  }
+
+  // A rotation needs one free slot before it can retire the old record. Dropping an older
+  // rotated record keeps reuse detection intact; when every slot is live the call is refused and
+  // the presented token stays valid, so the client can retry once capacity frees up.
+  private ensureRotationRoom() {
+    this.prune();
+    if (this.refresh.size < MAX_REFRESH) return;
+    const rotated = this.rotatedRecord();
+    if (!rotated) throw new StoreFullError(REFRESH_CAPACITY);
+    this.refresh.delete(rotated.hash);
   }
 
   // Oldest first. A capped server invalidates the oldest access tokens instead of growing.
@@ -326,11 +352,11 @@ export class OAuthStore {
     }
   }
 
-  private evictUsedCodes() {
-    while (this.usedCodes.size >= MAX_USED_CODES) {
-      const oldest = this.usedCodes.keys().next().value;
+  private evictUsedCodes(usedCodes: Map<string, { familyId: string; expiresAt: number }>) {
+    while (usedCodes.size >= MAX_USED_CODES) {
+      const oldest = usedCodes.keys().next().value;
       if (oldest === undefined) return;
-      this.usedCodes.delete(oldest);
+      usedCodes.delete(oldest);
     }
   }
 
@@ -359,17 +385,24 @@ export class OAuthStore {
     if (requested && !requested.every((s) => record.scope.includes(s))) {
       return { kind: 'invalid_scope' };
     }
+    // Make room before touching the record: a capacity refusal must leave the presented token
+    // usable. The old record is retired before the write so the file records the rotation;
+    // issueTokens is durable-first, so a failed write leaves memory otherwise unchanged and the
+    // flag is rolled back for a clean retry.
+    this.ensureRotationRoom();
     record.rotated = true;
-    // At the cap, evictRefresh reclaims this just-rotated record (it is the oldest rotated one),
-    // so a rotation always has room; only a new sign-in is refused. See
-    // docs/things-that-look-like-bugs.md.
-    const issued = this.issueTokens({
-      clientId,
-      scope: requested ?? record.scope,
-      resource: record.resource,
-      familyId: record.familyId,
-    });
-    return { kind: 'ok', issued };
+    try {
+      const issued = this.issueTokens({
+        clientId,
+        scope: requested ?? record.scope,
+        resource: record.resource,
+        familyId: record.familyId,
+      });
+      return { kind: 'ok', issued };
+    } catch (error) {
+      record.rotated = false;
+      throw error;
+    }
   }
 
   // Durable first: narrow the tables, write them, and only then drop the in-memory grants. A
@@ -390,15 +423,16 @@ export class OAuthStore {
     for (const [key, value] of source) target.set(key, value);
   }
 
-  // RFC 7009: revoking a token that is unknown, expired or someone else's is not an error.
-  revokeToken(token: string, clientId: string) {
+  // RFC 7009: revoking a token that is unknown, expired or someone else's is not an error. The
+  // client id is a hint, not authentication, so revocation never re-fetches client metadata.
+  revokeToken(token: string, clientId?: string) {
     const key = hashToken(token);
-    const refresh = this.refresh.get(key);
-    if (refresh?.clientId === clientId) this.revokeFamily(refresh.familyId);
-    // An access token identifies the same family, so revoking either token ends the grant. With
-    // short-lived access tokens this is the only way a client can retire what it holds.
-    const access = this.access.get(key);
-    if (access?.clientId === clientId) this.revokeFamily(access.familyId);
+    // An access token identifies the same family as its refresh token, so revoking either ends
+    // the grant; with short-lived access tokens that is the only way to retire what is held.
+    const found = this.refresh.get(key) ?? this.access.get(key);
+    if (!found) return;
+    if (clientId !== undefined && found.clientId !== clientId) return;
+    this.revokeFamily(found.familyId);
   }
 
   verifyAccess(token: string, resource: string): { clientId: string } | undefined {

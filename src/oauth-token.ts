@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type http from 'node:http';
-import type { ClientView, Issued } from './oauth-store.ts';
+import { isClientIdUrl } from './oauth-cimd.ts';
+import { StoreFullError, type CodeGrant, type Issued, type RotateResult } from './oauth-store.ts';
 import {
   SECURITY_HEADERS,
   methodNotAllowed,
@@ -42,97 +43,136 @@ function sendTokens(res: Res, issued: Issued) {
   });
 }
 
-// Public clients only: the client is identified by client_id and proved by PKCE, not a secret.
-async function knownClient(
-  deps: OAuthDeps,
-  params: URLSearchParams,
-  res: Res,
-): Promise<ClientView | undefined> {
-  const id = single(params, 'client_id');
-  const client = id ? await deps.resolveClient(id) : undefined;
-  if (!client) sendOAuthError(res, 400, 'invalid_client', 'unknown client_id');
-  return client;
+function knownId(deps: OAuthDeps, clientId: string): boolean {
+  return deps.store.getClient(clientId) !== undefined || isClientIdUrl(clientId);
 }
 
-type Form = { params: URLSearchParams; client: ClientView };
+// These endpoints never re-fetch client metadata: the authorization code or refresh record
+// already binds the client, and revocation must work while the metadata host is down. A
+// registered client or a URL-shaped CIMD id passes here; anything else is refused before a grant
+// is examined.
+function clientIdOf(deps: OAuthDeps, params: URLSearchParams, res: Res): string | undefined {
+  const id = single(params, 'client_id');
+  if (id === undefined || !knownId(deps, id)) {
+    sendOAuthError(res, 400, 'invalid_client', 'unknown client_id');
+    return undefined;
+  }
+  return id;
+}
 
-// The parsed form body and its client, or undefined once an error response has been sent.
-async function clientForm(
-  deps: OAuthDeps,
-  req: http.IncomingMessage,
-  res: Res,
-): Promise<Form | undefined> {
-  const params = await readForm(req, res);
-  const client = params && (await knownClient(deps, params, res));
-  return params && client ? { params, client } : undefined;
+// A token minted for a different resource would be accepted nowhere, so a mismatched `resource`
+// is refused before any grant is examined.
+function targetAllowed(deps: OAuthDeps, params: URLSearchParams, res: Res): boolean {
+  const resource = single(params, 'resource');
+  if (resource === undefined || sameResource(resource, deps.config.resource)) return true;
+  sendOAuthError(res, 400, 'invalid_target', 'resource must be this server MCP endpoint');
+  return false;
+}
+
+function dispatchGrant(deps: OAuthDeps, params: URLSearchParams, res: Res, clientId: string) {
+  const grant = single(params, 'grant_type');
+  if (grant === 'authorization_code') return codeGrant(deps, params, res, clientId);
+  if (grant === 'refresh_token') return refreshGrant(deps, params, res, clientId);
+  return sendOAuthError(res, 400, 'unsupported_grant_type');
 }
 
 export async function handleToken(deps: OAuthDeps, req: http.IncomingMessage, res: Res) {
   if (req.method !== 'POST') return methodNotAllowed(res, 'POST');
-  const form = await clientForm(deps, req, res);
-  if (!form) return undefined;
-  const { params, client } = form;
+  const params = await readForm(req, res);
+  if (!params) return undefined;
   if (repeatedParam(params)) {
     return sendOAuthError(res, 400, 'invalid_request', 'parameters must not repeat');
   }
-  const resource = single(params, 'resource');
-  if (resource !== undefined && !sameResource(resource, deps.config.resource)) {
-    return sendOAuthError(res, 400, 'invalid_target', 'resource must be this server MCP endpoint');
-  }
-  const grant = single(params, 'grant_type');
-  if (grant === 'authorization_code') return codeGrant(deps, params, res, client);
-  if (grant === 'refresh_token') return refreshGrant(deps, params, res, client);
-  return sendOAuthError(res, 400, 'unsupported_grant_type');
+  const clientId = clientIdOf(deps, params, res);
+  if (clientId === undefined) return undefined;
+  if (!targetAllowed(deps, params, res)) return undefined;
+  return dispatchGrant(deps, params, res, clientId);
 }
 
-function codeGrant(deps: OAuthDeps, params: URLSearchParams, res: Res, client: ClientView) {
+type CodeRequest = { code: string; verifier: string; redirectUri: string };
+
+function codeRequest(params: URLSearchParams, res: Res): CodeRequest | undefined {
   const code = single(params, 'code');
   const verifier = single(params, 'code_verifier');
   const redirectUri = single(params, 'redirect_uri');
   if (!code || !verifier || !redirectUri) {
-    return sendOAuthError(
+    sendOAuthError(
       res,
       400,
       'invalid_request',
       'code, code_verifier and redirect_uri are required',
     );
+    return undefined;
   }
   if (!VERIFIER_PATTERN.test(verifier)) {
-    return sendOAuthError(res, 400, 'invalid_request', 'malformed code_verifier');
+    sendOAuthError(res, 400, 'invalid_request', 'malformed code_verifier');
+    return undefined;
   }
-  const spent = deps.store.consumeCode(code);
+  return { code, verifier, redirectUri };
+}
+
+function sendCapacity(deps: OAuthDeps, res: Res, clientId: string) {
+  deps.log('token_capacity', { client_id: clientId });
+  return sendOAuthError(res, 503, 'temporarily_unavailable', 'too many grants; try again shortly');
+}
+
+// Check capacity before anything irreversible: a code burned by a temporary refusal would force
+// the owner through consent again.
+function newGrantAllowed(deps: OAuthDeps, res: Res, clientId: string): boolean {
+  try {
+    deps.store.assertNewGrantCapacity();
+    return true;
+  } catch (error) {
+    if (!(error instanceof StoreFullError)) throw error;
+    sendCapacity(deps, res, clientId);
+    return false;
+  }
+}
+
+// The code names the client, redirect and resource it was issued for. A mismatch means the code
+// was not issued to this caller; a resource change means it must not mint a token for the new
+// endpoint.
+function codeGrantProblem(
+  deps: OAuthDeps,
+  grant: CodeGrant,
+  clientId: string,
+  redirectUri: string,
+): string | undefined {
+  if (grant.clientId !== clientId || grant.redirectUri !== redirectUri) {
+    return 'code was not issued for this client and redirect';
+  }
+  if (grant.resource !== deps.config.resource) {
+    deps.log('resource_changed', { client_id: clientId });
+    return 'code was issued for another resource';
+  }
+  return undefined;
+}
+
+function codeGrant(deps: OAuthDeps, params: URLSearchParams, res: Res, clientId: string) {
+  const request = codeRequest(params, res);
+  if (!request) return undefined;
+  if (!newGrantAllowed(deps, res, clientId)) return undefined;
+  const spent = deps.store.consumeCode(request.code);
   if (spent.kind !== 'ok') return sendOAuthError(res, 400, 'invalid_grant', 'code is not valid');
   const { grant, codeHash } = spent;
-  if (grant.clientId !== client.clientId || grant.redirectUri !== redirectUri) {
-    return sendOAuthError(
-      res,
-      400,
-      'invalid_grant',
-      'code was not issued for this client and redirect',
-    );
-  }
-  // The resource is fixed at authorization time. If the operator repointed the server since, the
-  // code no longer describes this endpoint and must not mint a token for the new one.
-  if (grant.resource !== deps.config.resource) {
-    deps.log('resource_changed', { client_id: client.clientId });
-    return sendOAuthError(res, 400, 'invalid_grant', 'code was issued for another resource');
-  }
-  const challenge = createHash('sha256').update(verifier).digest('base64url');
+  const problem = codeGrantProblem(deps, grant, clientId, request.redirectUri);
+  if (problem) return sendOAuthError(res, 400, 'invalid_grant', problem);
+  const challenge = createHash('sha256').update(request.verifier).digest('base64url');
   if (!constantTimeEqual(challenge, grant.codeChallenge)) {
-    deps.log('pkce_failed', { client_id: client.clientId });
+    deps.log('pkce_failed', { client_id: clientId });
     return sendOAuthError(res, 400, 'invalid_grant', 'PKCE verification failed');
   }
   const issued = deps.store.issueTokens({
-    clientId: client.clientId,
     scope: grant.scope,
     resource: grant.resource,
     codeHash,
+    clientId,
   });
-  deps.log('token_issued', { client_id: client.clientId, grant: 'authorization_code' });
+  deps.log('token_issued', { client_id: clientId, grant: 'authorization_code' });
   return sendTokens(res, issued);
 }
 
-function refreshGrant(deps: OAuthDeps, params: URLSearchParams, res: Res, client: ClientView) {
+function refreshGrant(deps: OAuthDeps, params: URLSearchParams, res: Res, clientId: string) {
   const token = single(params, 'refresh_token');
   if (!token) return sendOAuthError(res, 400, 'invalid_request', 'refresh_token is required');
   const rawScope = single(params, 'scope');
@@ -140,12 +180,18 @@ function refreshGrant(deps: OAuthDeps, params: URLSearchParams, res: Res, client
   if (rawScope !== undefined && !requested) {
     return sendOAuthError(res, 400, 'invalid_scope', 'unsupported scope');
   }
-  const result = deps.store.rotateRefresh(token, client.clientId, requested, deps.config.resource);
+  let result: RotateResult;
+  try {
+    result = deps.store.rotateRefresh(token, clientId, requested, deps.config.resource);
+  } catch (error) {
+    if (!(error instanceof StoreFullError)) throw error;
+    return sendCapacity(deps, res, clientId);
+  }
   if (result.kind === 'ok') {
-    deps.log('token_issued', { client_id: client.clientId, grant: 'refresh_token' });
+    deps.log('token_issued', { client_id: clientId, grant: 'refresh_token' });
     return sendTokens(res, result.issued);
   }
-  if (result.kind === 'reuse') deps.log('refresh_reuse', { client_id: client.clientId });
+  if (result.kind === 'reuse') deps.log('refresh_reuse', { client_id: clientId });
   if (result.kind === 'invalid_scope') {
     return sendOAuthError(res, 400, 'invalid_scope', 'scope exceeds the original grant');
   }
@@ -155,14 +201,18 @@ function refreshGrant(deps: OAuthDeps, params: URLSearchParams, res: Res, client
 // RFC 7009. Always answers 200 so a caller cannot learn whether a token existed.
 export async function handleRevoke(deps: OAuthDeps, req: http.IncomingMessage, res: Res) {
   if (req.method !== 'POST') return methodNotAllowed(res, 'POST');
-  const form = await clientForm(deps, req, res);
-  if (!form) return undefined;
-  if (repeatedParam(form.params)) {
+  const params = await readForm(req, res);
+  if (!params) return undefined;
+  if (repeatedParam(params)) {
     return sendOAuthError(res, 400, 'invalid_request', 'parameters must not repeat');
   }
-  const token = single(form.params, 'token');
-  if (token) deps.store.revokeToken(token, form.client.clientId);
-  deps.log('revoked', { client_id: form.client.clientId });
+  const hint = single(params, 'client_id');
+  if (hint !== undefined && !knownId(deps, hint)) {
+    return sendOAuthError(res, 400, 'invalid_client', 'unknown client_id');
+  }
+  const token = single(params, 'token');
+  if (token) deps.store.revokeToken(token, hint);
+  deps.log('revoked', hint === undefined ? {} : { client_id: hint });
   res.writeHead(200, SECURITY_HEADERS);
   return res.end();
 }

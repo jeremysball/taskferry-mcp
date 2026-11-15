@@ -518,7 +518,7 @@ the source task has ended but before its record updates.
 
 **Observe:** after a client changes the redirect URIs or `client_name` in its metadata document, the bridge keeps using the old values for up to an hour, and a document the server cannot fetch is retried on every request.
 
-**Why:** the document is fetched on demand and cached for its `Cache-Control` lifetime, clamped to 60 seconds to 1 hour with a 5-minute default, so a hot client costs one fetch rather than one per request. Refusals are not cached, because an outage should not outlast its cause. The allowlist still decides every redirect destination, so a stale document can only narrow what the client may use.
+**Why:** the document is fetched on demand and cached for its `Cache-Control` lifetime, clamped to 60 seconds to 1 hour with a 5-minute default, so a hot client costs one fetch rather than one per request. Refusals are not cached, because an outage should not outlast its cause. `no-cache`, `no-store`, a zero `max-age` and a malformed `max-age` all mean the document is not reused, so a revalidation directive is never silently upgraded into a five-minute trust window. The allowlist still decides every redirect destination, so a stale document can only narrow what the client may use.
 
 **Becomes a bug if:** the cache outlives an hour, or a rejected request still redirects to a URI the current document does not list.
 
@@ -534,7 +534,7 @@ the source task has ended but before its record updates.
 
 **Observe:** past 1000 live access tokens or 1000 remembered spent codes, the oldest entry is evicted silently. A replayed code that was evicted is refused as unknown rather than revoking its family.
 
-**Why:** the cap bounds memory for a single-owner server whose clients are few; a sign-in older than a thousand tokens or codes is not a live attack signal, and the replay is still refused. Refresh-token rotation at its own cap reclaims the record it just rotated instead of evicting someone else.
+**Why:** the cap bounds memory for a single-owner server whose clients are few; a sign-in older than a thousand tokens or codes is not a live attack signal, and the replay is still refused. Refresh-token rotation at the cap reclaims an older rotated record for room; when every slot holds a live grant, the rotation is refused with a retryable 503 and the presented token stays valid, so its own replay marker is never the record that gets dropped.
 
 **Becomes a bug if:** eviction makes a valid, current token stop working, or a replay of a code that is still inside the cap is accepted.
 
@@ -545,3 +545,27 @@ the source task has ended but before its record updates.
 **Why:** the host is the part the owner can read and compare; the path is kept to validate the document against the URL and to check redirects, not to display. The document was already fetched and validated to reach this page.
 
 **Becomes a bug if:** two different client URLs on one host are shown identically in a way that changes what the owner is approving.
+
+## Token and revocation requests never re-fetch client metadata
+
+**Observe:** after a Client ID Metadata Document client signs in, token exchange, refresh and `/oauth/revoke` keep working while the document's host is down or the document has been withdrawn. A `client_id` that is URL-shaped is accepted on its form alone at those endpoints.
+
+**Why:** the authorization code or refresh record already binds the client it was issued to, and a revocation that depends on the reported attacker's host staying reachable is not a revocation. Refusing an unrecognized plain `client_id` still returns `invalid_client`, and a URL-shaped id that does not match the stored grant is refused as `invalid_grant`. Only the authorize endpoint needs the document, for the redirect list and the consent page.
+
+**Becomes a bug if:** a token request mints a token for a client the grant does not name, or revocation stops working for a registered client.
+
+## A burst of distinct metadata documents is refused past a fixed in-flight cap
+
+**Observe:** with 20 metadata fetches already in flight, a 21st distinct client id is treated as an unknown client until one finishes. Repeated requests for the same id share a single fetch.
+
+**Why:** the cache bounds completed documents but not concurrent outbound requests, and anyone who can reach the authorize endpoint can name new ids. Fetching 20 at a time bounds sockets and memory; the refusal is a safe error, and a retry after a slot frees up fetches normally.
+
+**Becomes a bug if:** the cap rejects a client whose document is already cached, or requests for one id open more than one connection at a time.
+
+## Every IP literal is refused as a metadata host, including a public one
+
+**Observe:** `https://8.8.8.8/client.json` is refused even though the address is public, while the same document on a hostname is fetched.
+
+**Why:** the guard refuses all IP literals rather than trying to classify private ranges. That removes the IPv6 bracket-normalization trap that let bracketed literals through, and a metadata document is expected to live at a stable named URL. A public name that resolves to a private address is still not detected; that residual risk is recorded above.
+
+**Becomes a bug if:** a URL-shaped client id with a hostname is refused for being an address, or a bracketed IPv6 literal reaches the fetcher.

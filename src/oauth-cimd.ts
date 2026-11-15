@@ -1,6 +1,6 @@
 import { isIP } from 'node:net';
 import { isRecord, isStrings } from './json.ts';
-import { cleanClientName, redirectAllowed } from './oauth-clients.ts';
+import { MAX_REDIRECT_URI_CHARS, cleanClientName, redirectAllowed } from './oauth-clients.ts';
 import type { RedirectRules } from './oauth-config.ts';
 import type { ClientView } from './oauth-store.ts';
 
@@ -13,6 +13,7 @@ export const CIMD_DEFAULT_CACHE_MS = 5 * 60 * 1000;
 export const CIMD_MIN_CACHE_MS = 60 * 1000;
 export const CIMD_MAX_CACHE_MS = 60 * 60 * 1000;
 export const CIMD_MAX_CACHE_ENTRIES = 100;
+export const CIMD_MAX_INFLIGHT = 20;
 const CIMD_MAX_REDIRECT_URIS = 10;
 const SUPPORTED_GRANTS = ['authorization_code', 'refresh_token'];
 
@@ -26,39 +27,32 @@ export type CimdOptions = {
   fetch?: CimdFetch;
 };
 
-export type CimdClient = ClientView & { cimd: true };
-
-const PRIVATE_V4 = [
-  /^10\./,
-  /^127\./,
-  /^169\.254\./,
-  /^172\.(1[6-9]|2\d|3[01])\./,
-  /^192\.168\./,
-  /^0\./,
-  /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./,
-  /^198\.(18|19)\./,
-  /^192\.0\.0\./,
-  /^255\.255\.255\.255$/,
-];
-
 const LOCAL_SUFFIXES = ['.localhost', '.local', '.internal', '.home.arpa'];
-const PRIVATE_V6 = [/^::1$/, /^::$/, /^f[cd][0-9a-f]{2}:/, /^fe[89ab][0-9a-f]:/, /^::ffff:127\./];
 
-function privateAddress(host: string): boolean {
-  const kind = isIP(host);
-  if (kind === 4) return PRIVATE_V4.some((pattern) => pattern.test(host));
-  if (kind !== 6) return false;
-  const bare = host.replace(/^\[|\]$/g, '');
-  return PRIVATE_V6.some((pattern) => pattern.test(bare));
+// SSRF guard for literal addresses and obviously local names. Every IP literal is refused, so an
+// IPv6 form cannot be mistaken for a hostname, and one trailing dot is ignored so `localhost.`
+// cannot slip past the local-name checks. A public name that resolves to a private address is
+// not caught here; see docs/things-that-look-like-bugs.md.
+function privateHost(hostname: string): boolean {
+  const host = hostname
+    .toLowerCase()
+    .replace(/^\[|\]$/g, '')
+    .replace(/\.$/, '');
+  if (isIP(host) !== 0) return true;
+  if (host === 'localhost') return true;
+  return LOCAL_SUFFIXES.some((suffix) => host.endsWith(suffix));
 }
 
-// SSRF guard for literal addresses and obviously local names. DNS that resolves to a private
-// address is not caught here; see docs/things-that-look-like-bugs.md.
-function privateHost(hostname: string): boolean {
-  const host = hostname.toLowerCase();
-  if (host === 'localhost') return true;
-  if (LOCAL_SUFFIXES.some((suffix) => host.endsWith(suffix))) return true;
-  return privateAddress(host);
+// The URL parser removes dot segments while resolving, so the raw path has to be checked. A
+// segment is also decoded first, because `%2e%2e` is a dot segment to the origin server.
+function dotSegment(segment: string): boolean {
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(segment);
+  } catch {
+    return true;
+  }
+  return decoded === '.' || decoded === '..' || decoded.includes('/') || decoded.includes('\\');
 }
 
 // Returns the parsed client_id URL, or undefined when it is not a valid CIMD identifier: https,
@@ -72,27 +66,30 @@ export function parseClientIdUrl(value: string): URL | undefined {
   }
   if (url.protocol !== 'https:' || url.pathname === '/') return undefined;
   if (url.username !== '' || url.password !== '' || url.hash !== '') return undefined;
-  // The URL parser removes dot segments while resolving, so the raw path has to be checked.
   const rawPath = value.replace(/^[a-z][a-z0-9+.-]*:\/\/[^/?#]*/i, '').split(/[?#]/)[0];
-  if (rawPath.split('/').some((segment) => segment === '.' || segment === '..')) return undefined;
+  if (rawPath.split('/').some(dotSegment)) return undefined;
   return url;
 }
 
 export const isClientIdUrl = (value: string) => parseClientIdUrl(value) !== undefined;
 
-// The first thing about the document that disqualifies it, or undefined when it is acceptable.
-function documentProblem(
+type DocumentVerdict = { redirectUris: string[] } | { reason: string };
+
+// The redirect list is validated once here, so the same filtered list both decides acceptance
+// and becomes the client; a second pass could disagree with the first.
+function documentVerdict(
   body: unknown,
   clientId: string,
   redirects: RedirectRules,
-): string | undefined {
-  if (!isRecord(body)) return 'not_object';
-  if (body.client_id !== clientId) return 'client_id_mismatch';
-  if (hasSharedSecret(body)) return 'client_secret';
-  if (!validAuthMethod(body)) return 'auth_method';
+): DocumentVerdict {
+  if (!isRecord(body)) return { reason: 'not_object' };
+  if (body.client_id !== clientId) return { reason: 'client_id_mismatch' };
+  if (hasSharedSecret(body)) return { reason: 'client_secret' };
+  if (!validAuthMethod(body)) return { reason: 'auth_method' };
   const metadata = metadataProblem(body);
-  if (metadata) return metadata;
-  return allowedRedirects(body.redirect_uris, redirects).length > 0 ? undefined : 'redirect_uris';
+  if (metadata) return { reason: metadata };
+  const redirectUris = allowedRedirects(body.redirect_uris, redirects);
+  return redirectUris.length > 0 ? { redirectUris } : { reason: 'redirect_uris' };
 }
 
 function hasSharedSecret(body: Record<string, unknown>): boolean {
@@ -120,8 +117,9 @@ function validGrants(value: unknown): boolean {
   );
 }
 
+// Registration accepts exactly ["code"], so a metadata document may not register a broader set.
 function validResponseTypes(value: unknown): boolean {
-  return isStrings(value) && value.includes('code');
+  return isStrings(value) && value.length === 1 && value[0] === 'code';
 }
 
 // The document registers the redirect URIs, but the operator's allowlist still decides which
@@ -133,16 +131,20 @@ function allowedRedirects(value: unknown, redirects: RedirectRules): string[] {
   return [
     ...new Set(
       value.filter(
-        (uri): uri is string => typeof uri === 'string' && redirectAllowed(redirects, uri),
+        (uri): uri is string =>
+          typeof uri === 'string' &&
+          uri.length <= MAX_REDIRECT_URI_CHARS &&
+          redirectAllowed(redirects, uri),
       ),
     ),
   ];
 }
 
-type CacheEntry = { client: CimdClient; expiresAt: number };
+type CacheEntry = { client: ClientView; expiresAt: number };
 
 export class CimdResolver {
   private readonly cache = new Map<string, CacheEntry>();
+  private readonly inflight = new Map<string, Promise<ClientView | undefined>>();
   private readonly options: CimdOptions;
   private readonly now: () => number;
   private readonly fetchImpl: CimdFetch;
@@ -155,12 +157,31 @@ export class CimdResolver {
 
   // A registered client always wins; a URL-shaped id is fetched and validated. Any failure is an
   // unknown client: the caller shows an error here rather than redirecting.
-  async resolve(clientId: string): Promise<CimdClient | undefined> {
+  async resolve(clientId: string): Promise<ClientView | undefined> {
     const url = parseClientIdUrl(clientId);
     if (!url || privateHost(url.hostname)) return undefined;
     const cached = this.cache.get(clientId);
     if (cached && cached.expiresAt > this.now()) return cached.client;
     if (cached) this.cache.delete(clientId);
+    return this.load(clientId);
+  }
+
+  // One fetch per client id at a time, so a burst of sign-ins naming the same document shares
+  // one answer. The cap bounds distinct ids, which the cache cannot: it holds only completed
+  // fetches, and a burst of distinct ids would otherwise run unbounded in parallel.
+  private load(clientId: string): Promise<ClientView | undefined> {
+    const shared = this.inflight.get(clientId);
+    if (shared) return shared;
+    if (this.inflight.size >= CIMD_MAX_INFLIGHT) {
+      this.options.log('cimd_fetch_failed', { reason: 'busy' });
+      return Promise.resolve(undefined);
+    }
+    const task = this.loadOnce(clientId).finally(() => this.inflight.delete(clientId));
+    this.inflight.set(clientId, task);
+    return task;
+  }
+
+  private async loadOnce(clientId: string): Promise<ClientView | undefined> {
     const document = await this.fetchDocument(clientId);
     if (!document) return undefined;
     const client = this.accept(clientId, document);
@@ -169,7 +190,7 @@ export class CimdResolver {
     return client;
   }
 
-  private remember(clientId: string, client: CimdClient, maxAgeMs: number | undefined) {
+  private remember(clientId: string, client: ClientView, maxAgeMs: number | undefined) {
     // `no-store` (or max-age=0) wins over the lower clamp.
     if (maxAgeMs === 0) return;
     while (this.cache.size >= CIMD_MAX_CACHE_ENTRIES) {
@@ -182,6 +203,12 @@ export class CimdResolver {
       Math.max(CIMD_MIN_CACHE_MS, maxAgeMs ?? CIMD_DEFAULT_CACHE_MS),
     );
     this.cache.set(clientId, { client, expiresAt: this.now() + ttl });
+  }
+
+  // An early rejection still has a response body to release; leaving it unread can pin the
+  // connection until the server or the timeout gives up.
+  private discard(response: Response) {
+    if (response.body) void response.body.cancel().catch(() => {});
   }
 
   private async fetchDocument(
@@ -201,71 +228,82 @@ export class CimdResolver {
     // A redirect is a different document than the one the client_id names, so it is refused.
     if (response.status !== 200) {
       this.options.log('cimd_fetch_failed', { status: response.status });
+      this.discard(response);
       return undefined;
     }
     const type = (response.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase();
     if (type !== 'application/json' && !type.endsWith('+json')) {
       this.options.log('cimd_fetch_failed', { reason: 'content_type' });
+      this.discard(response);
       return undefined;
     }
     const declared = Number(response.headers.get('content-length') ?? '0');
     if (declared > CIMD_MAX_BYTES) {
       this.options.log('cimd_fetch_failed', { reason: 'too_large' });
+      this.discard(response);
       return undefined;
     }
-    const text = await readCapped(response);
-    if (text === undefined) {
-      this.options.log('cimd_fetch_failed', { reason: 'too_large' });
+    const body = await readCapped(response);
+    if ('reason' in body) {
+      this.options.log('cimd_fetch_failed', { reason: body.reason });
       return undefined;
     }
     try {
-      return { body: JSON.parse(text), maxAgeMs: cacheMaxAge(response.headers) };
+      return { body: JSON.parse(body.text), maxAgeMs: cacheMaxAge(response.headers) };
     } catch {
       this.options.log('cimd_fetch_failed', { reason: 'not_json' });
       return undefined;
     }
   }
 
-  private accept(clientId: string, document: { body: unknown }): CimdClient | undefined {
-    const body = document.body;
-    const problem = documentProblem(body, clientId, this.options.redirects);
-    if (problem) {
-      this.options.log('cimd_invalid_document', { reason: problem });
+  private accept(clientId: string, document: { body: unknown }): ClientView | undefined {
+    const verdict = documentVerdict(document.body, clientId, this.options.redirects);
+    if ('reason' in verdict) {
+      this.options.log('cimd_invalid_document', { reason: verdict.reason });
       return undefined;
     }
+    const body = document.body as Record<string, unknown>;
     return {
       clientId,
-      clientName: cleanClientName((body as Record<string, unknown>).client_name),
-      redirectUris: allowedRedirects(
-        (body as Record<string, unknown>).redirect_uris,
-        this.options.redirects,
-      ),
-      cimd: true,
+      clientName: cleanClientName(body.client_name),
+      redirectUris: verdict.redirectUris,
     };
   }
 }
 
+// A missing Cache-Control means the default TTL; anything present but unusable (`no-cache`, a
+// non-numeric max-age) means the document must not be reused.
 function cacheMaxAge(headers: Headers): number | undefined {
-  const cacheControl = headers.get('cache-control') ?? '';
-  if (/\bno-store\b/i.test(cacheControl)) return 0;
-  const match = /(?:^|,)\s*max-age=(\d+)/i.exec(cacheControl);
-  return match ? Number(match[1]) * 1000 : undefined;
+  const cacheControl = headers.get('cache-control');
+  if (cacheControl === null) return undefined;
+  if (/\bno-store\b/i.test(cacheControl) || /\bno-cache\b/i.test(cacheControl)) return 0;
+  const match = /(?:^|,)\s*max-age=(?:"?(\d+)"?)\s*(?:,|$)/i.exec(cacheControl);
+  if (match) return Number(match[1]) * 1000;
+  return /\bmax-age=/i.test(cacheControl) ? 0 : undefined;
 }
 
-async function readCapped(response: Response): Promise<string | undefined> {
-  if (!response.body) return '';
+type CappedBody = { text: string } | { reason: 'too_large' | 'read_failed' };
+
+async function readCapped(response: Response): Promise<CappedBody> {
+  if (!response.body) return { text: '' };
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
   let size = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    size += value.byteLength;
-    if (size > CIMD_MAX_BYTES) {
-      await reader.cancel();
-      return undefined;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > CIMD_MAX_BYTES) {
+        await reader.cancel().catch(() => {});
+        return { reason: 'too_large' };
+      }
+      chunks.push(value);
     }
-    chunks.push(value);
+  } catch {
+    // A body that fails mid-stream (abort, reset) is a failed fetch, not an oversized one.
+    await reader.cancel().catch(() => {});
+    return { reason: 'read_failed' };
   }
   const merged = new Uint8Array(size);
   let offset = 0;
@@ -273,5 +311,5 @@ async function readCapped(response: Response): Promise<string | undefined> {
     merged.set(chunk, offset);
     offset += chunk.byteLength;
   }
-  return new TextDecoder().decode(merged);
+  return { text: new TextDecoder().decode(merged) };
 }

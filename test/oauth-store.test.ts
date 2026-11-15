@@ -345,19 +345,43 @@ test('an access token revokes its whole family', () => {
   }
 });
 
-test('a new sign-in at the refresh cap is refused instead of evicting a live grant', () => {
+test('a mutation at the refresh cap is refused instead of evicting a live grant', () => {
   const h = harness();
   try {
     const client = register(h.store);
     const grants = Array.from({ length: MAX_REFRESH }, () => signIn(h.store, client.clientId));
     assert.throws(() => signIn(h.store, client.clientId), StoreFullError);
-    // The refusal did not damage existing grants.
+    assert.throws(() => h.store.assertNewGrantCapacity(), StoreFullError);
+    assert.throws(
+      () => h.store.rotateRefresh(grants[0].issued.refreshToken, client.clientId, undefined),
+      StoreFullError,
+    );
+    // The refusals did not damage existing grants, and the presented token was not retired.
     assert.ok(h.store.verifyAccess(grants[0].issued.accessToken, RESOURCE));
-    // Rotation still works at the cap by reclaiming the record it just rotated.
+  } finally {
+    h.done();
+  }
+});
+
+test('rotation at the cap reclaims an older rotated record, never its own', () => {
+  const h = harness();
+  try {
+    const client = register(h.store);
+    const grants = Array.from({ length: MAX_REFRESH - 1 }, () => signIn(h.store, client.clientId));
+    // Rotating fills the last slot and leaves one rotated record behind.
+    const second = h.store.rotateRefresh(grants[0].issued.refreshToken, client.clientId, undefined);
+    assert.equal(second.kind, 'ok');
+    // At the cap, the rotated record from the first rotation makes room for the next one.
+    const third = h.store.rotateRefresh(grants[1].issued.refreshToken, client.clientId, undefined);
+    assert.equal(third.kind, 'ok');
+    if (third.kind !== 'ok') throw new Error('unreachable');
+    // The oldest rotated token was reclaimed for space, so replaying it is refused as unknown
+    // rather than revoking a family; the newest grant still works.
     assert.equal(
       h.store.rotateRefresh(grants[0].issued.refreshToken, client.clientId, undefined).kind,
-      'ok',
+      'invalid',
     );
+    assert.ok(h.store.verifyAccess(third.issued.accessToken, RESOURCE));
   } finally {
     h.done();
   }
@@ -382,6 +406,26 @@ test('a resource change revokes refresh grants issued for the old resource', () 
       h.store.rotateRefresh(issued.refreshToken, client.clientId, undefined, RESOURCE).kind,
       'invalid',
     );
+  } finally {
+    h.done();
+  }
+});
+
+test('a rotation that cannot persist leaves the presented token usable and retryable', () => {
+  const h = harness();
+  try {
+    const client = register(h.store);
+    const { issued } = signIn(h.store, client.clientId);
+    const dir = path.dirname(h.file);
+    chmodSync(dir, 0o500);
+    try {
+      assert.throws(() => h.store.rotateRefresh(issued.refreshToken, client.clientId, undefined));
+    } finally {
+      chmodSync(dir, 0o700);
+    }
+    // The write failed before memory changed, so the old token is still live, not "reused".
+    assert.ok(h.store.verifyAccess(issued.accessToken, RESOURCE));
+    assert.equal(h.store.rotateRefresh(issued.refreshToken, client.clientId, undefined).kind, 'ok');
   } finally {
     h.done();
   }
