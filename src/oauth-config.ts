@@ -1,9 +1,8 @@
-import { homedir } from 'node:os';
-import path from 'node:path';
 import { ConfigError } from './errors.ts';
 import {
   absolute,
   asString,
+  defaultStateFile,
   firstFound,
   fromEnv,
   type Env,
@@ -27,7 +26,6 @@ export type OAuthConfig = {
 
 export const MIN_APPROVAL_SECRET_CHARS = 24;
 const LOOPBACK_HOSTS = ['localhost', '127.0.0.1', '[::1]'];
-const APP_DIR = 'taskferry-mcp';
 const LOOPBACK_KEYWORD = 'loopback';
 
 // Claude's hosted surfaces (claude.ai, Desktop, mobile) share one callback; the second is the
@@ -87,11 +85,6 @@ function asRedirects(value: unknown): RedirectRules {
     else rules.exact.push(parseWebUrl('OAuth allowed redirect', item).href);
   }
   return rules;
-}
-
-function defaultStatePath(env: Env) {
-  const base = env.XDG_STATE_HOME || path.join(homedir(), '.local', 'state');
-  return path.join(base, APP_DIR, 'oauth.json');
 }
 
 export type OAuthFlags = {
@@ -157,7 +150,7 @@ export function resolveOAuth(
     redirects: asRedirects(redirects ? redirects.value : DEFAULT_REDIRECTS),
     statePath: state
       ? absolute('OAuth state path', asString('OAuth state path', state.value))
-      : defaultStatePath(env),
+      : defaultStateFile(env, 'oauth.json'),
   };
 }
 

@@ -84,6 +84,7 @@ test('the authorization-server metadata advertises only what is implemented', as
     assert.deepEqual(body.response_types_supported, ['code']);
     assert.deepEqual(body.grant_types_supported, ['authorization_code', 'refresh_token']);
     assert.equal(body.authorization_response_iss_parameter_supported, true);
+    assert.equal(body.client_id_metadata_document_supported, true);
     assert.equal(sent.headers['access-control-allow-origin'], '*');
   } finally {
     await f.close();

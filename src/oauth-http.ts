@@ -1,7 +1,7 @@
 import type http from 'node:http';
 import type { OAuthConfig } from './oauth-config.ts';
 import type { FailureLimiter } from './oauth-limiter.ts';
-import type { OAuthStore } from './oauth-store.ts';
+import type { ClientView, OAuthStore } from './oauth-store.ts';
 
 export const MAX_OAUTH_BODY_BYTES = 16 * 1024;
 
@@ -29,6 +29,8 @@ export type OAuthDeps = {
   store: OAuthStore;
   limiter: FailureLimiter;
   log: OAuthLog;
+  // A stored registration or a Client ID Metadata Document; undefined when neither resolves.
+  resolveClient: (clientId: string) => Promise<ClientView | undefined>;
 };
 
 export class BodyTooLargeError extends Error {
@@ -117,4 +119,29 @@ export function methodNotAllowed(res: http.ServerResponse, allow: string) {
 export function single(params: URLSearchParams, name: string): string | undefined {
   const all = params.getAll(name);
   return all.length === 1 ? all[0] : undefined;
+}
+
+// RFC 6749 section 3.1: request parameters MUST NOT be included more than once. Treating a
+// repeated parameter as merely absent turns a malformed request into a different valid one.
+export function repeatedParam(params: URLSearchParams): string | undefined {
+  const seen = new Set<string>();
+  for (const name of params.keys()) {
+    if (seen.has(name)) return name;
+    seen.add(name);
+  }
+  return undefined;
+}
+
+// The shared bounded form reader. Callers decide how to render 'unsupported' and 'too_large'.
+export async function readFormBody(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+): Promise<URLSearchParams | 'unsupported' | 'too_large'> {
+  if (!isFormContent(req)) return 'unsupported';
+  try {
+    return new URLSearchParams(await readBody(req, res));
+  } catch (error) {
+    if (!(error instanceof BodyTooLargeError)) throw error;
+    return 'too_large';
+  }
 }

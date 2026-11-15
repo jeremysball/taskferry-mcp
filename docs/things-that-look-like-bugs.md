@@ -486,7 +486,7 @@ the source task has ended but before its record updates.
 
 **Observe:** a client that requests `taskferry offline_access` or nothing at all gets the same grant, with `scope: taskferry`. An unknown scope is refused with `invalid_scope`.
 
-**Why:** there is one real scope and it is the whole tool surface, the same authority as the bridge token. `offline_access` is accepted because Claude adds it when the server lists it, and a refresh token is always issued anyway. Per-tool scopes would be a new design, not a bug fix.
+**Why:** there is one real scope and it is the whole tool surface, the same authority as the bridge token. `offline_access` is accepted beside `taskferry` because Claude adds it when the server lists it, and a refresh token is always issued anyway. A request naming only `offline_access` is refused with `invalid_scope`, because granting `taskferry` would hand out a scope the client never asked for. Per-tool scopes would be a new design, not a bug fix.
 
 **Becomes a bug if:** a client can obtain a scope that was not requested, or a refresh can widen the granted scope.
 
@@ -513,3 +513,35 @@ the source task has ended but before its record updates.
 **Why:** an empty environment variable counts as unset for every setting in this bridge. The default list is the narrow one, so the fallback fails safe. To allow only one client, name its callback.
 
 **Becomes a bug if:** an empty value widens the list beyond the default, or a malformed non-empty value is ignored instead of refused.
+
+## A client metadata document is trusted until its cache lifetime expires
+
+**Observe:** after a client changes the redirect URIs or `client_name` in its metadata document, the bridge keeps using the old values for up to an hour, and a document the server cannot fetch is retried on every request.
+
+**Why:** the document is fetched on demand and cached for its `Cache-Control` lifetime, clamped to 60 seconds to 1 hour with a 5-minute default, so a hot client costs one fetch rather than one per request. Refusals are not cached, because an outage should not outlast its cause. The allowlist still decides every redirect destination, so a stale document can only narrow what the client may use.
+
+**Becomes a bug if:** the cache outlives an hour, or a rejected request still redirects to a URI the current document does not list.
+
+## A client metadata URL on a private-network name is refused even if it is reachable
+
+**Observe:** registering a client whose `client_id` is an `https` URL on a literal private address such as `https://10.0.0.5/client.json`, or on a `localhost`/`.local`/`.internal`/`.home.arpa` name, is refused; a URL over plain `http` is refused too.
+
+**Why:** the bridge fetches the document from its own network position, so an unrestricted URL is a server-side request forgery primitive that can read internal services. The check covers literal addresses and obviously local names only; a public DNS name that resolves to a private address is not detected, because resolving before fetch would not bind the later connection to that answer.
+
+**Becomes a bug if:** a refused URL is fetched anyway, or the guard is applied to the client's own redirect destinations instead of the metadata URL.
+
+## The oldest access token or spent code is forgotten at the cap
+
+**Observe:** past 1000 live access tokens or 1000 remembered spent codes, the oldest entry is evicted silently. A replayed code that was evicted is refused as unknown rather than revoking its family.
+
+**Why:** the cap bounds memory for a single-owner server whose clients are few; a sign-in older than a thousand tokens or codes is not a live attack signal, and the replay is still refused. Refresh-token rotation at its own cap reclaims the record it just rotated instead of evicting someone else.
+
+**Becomes a bug if:** eviction makes a valid, current token stop working, or a replay of a code that is still inside the cap is accepted.
+
+## The `client_id` is shown as a hostname on the consent page
+
+**Observe:** the consent page for a Client ID Metadata Document client shows only the URL's host, not its full path, and the page never fetches the document a second time.
+
+**Why:** the host is the part the owner can read and compare; the path is kept to validate the document against the URL and to check redirects, not to display. The document was already fetched and validated to reach this page.
+
+**Becomes a bug if:** two different client URLs on one host are shown identically in a way that changes what the owner is approving.

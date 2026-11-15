@@ -1,12 +1,14 @@
 import type http from 'node:http';
 import { StoreFullError, type Pending } from './oauth-store.ts';
+import { isClientIdUrl } from './oauth-cimd.ts';
+import type { ClientView } from './oauth-store.ts';
+import { redirectAllowed } from './oauth-clients.ts';
 import {
-  BodyTooLargeError,
   SECURITY_HEADERS,
-  isFormContent,
   methodNotAllowed,
-  readBody,
+  readFormBody,
   redirect,
+  repeatedParam,
   sendHtml,
   single,
   type OAuthDeps,
@@ -41,7 +43,7 @@ export async function handleAuthorize(
   res: http.ServerResponse,
   url: URL,
 ) {
-  if (req.method === 'GET') return authorizeGet(deps, res, url.searchParams);
+  if (req.method === 'GET') return await authorizeGet(deps, res, url.searchParams);
   if (req.method === 'POST') return authorizePost(deps, req, res);
   return methodNotAllowed(res, 'GET, POST');
 }
@@ -67,16 +69,41 @@ function protocolRefusal(deps: OAuthDeps, params: URLSearchParams): Refusal | un
   return undefined;
 }
 
-function authorizeGet(deps: OAuthDeps, res: http.ServerResponse, params: URLSearchParams) {
+type Target = { client: ClientView; redirectUri: string; state: string | undefined };
+
+// An unknown client or an unregistered redirect never gets a redirect: the error is shown here,
+// so this endpoint cannot be used as an open redirector. The allowlist is checked again on every
+// request, so tightening it also retires redirects registered earlier.
+async function authorizeTarget(
+  deps: OAuthDeps,
+  params: URLSearchParams,
+): Promise<Target | undefined> {
   const clientId = single(params, 'client_id');
   const redirectUri = single(params, 'redirect_uri');
-  const client = clientId ? deps.store.getClient(clientId) : undefined;
-  // An unknown client or an unregistered redirect never gets a redirect: the error is shown
-  // here, so this endpoint cannot be used as an open redirector.
-  if (!client || !redirectUri || !client.redirectUris.includes(redirectUri)) {
+  const client = clientId ? await deps.resolveClient(clientId) : undefined;
+  if (
+    !client ||
+    !redirectUri ||
+    !client.redirectUris.includes(redirectUri) ||
+    !redirectAllowed(deps.config.redirects, redirectUri)
+  ) {
+    return undefined;
+  }
+  return { client, redirectUri, state: single(params, 'state') };
+}
+
+async function authorizeGet(deps: OAuthDeps, res: http.ServerResponse, params: URLSearchParams) {
+  const target = await authorizeTarget(deps, params);
+  if (!target) {
+    deps.log('authorize_refused', { reason: 'unknown_client_or_redirect' });
     return sendHtml(res, 400, renderError(INVALID_LINK));
   }
-  const state = single(params, 'state');
+  const { client, redirectUri, state } = target;
+  const duplicate = repeatedParam(params);
+  if (duplicate) {
+    const query = { error: 'invalid_request', error_description: `parameter ${duplicate} repeats` };
+    return redirect(res, clientRedirect(deps, redirectUri, state, query));
+  }
   const bounce = ([error, description]: Refusal) =>
     redirect(
       res,
@@ -89,6 +116,7 @@ function authorizeGet(deps: OAuthDeps, res: http.ServerResponse, params: URLSear
       redirectUri,
       state,
       clientId: client.clientId,
+      clientName: client.clientName,
       codeChallenge: single(params, 'code_challenge') ?? '',
       scope: parseScope(single(params, 'scope')) ?? [],
       resource: deps.config.resource,
@@ -98,7 +126,12 @@ function authorizeGet(deps: OAuthDeps, res: http.ServerResponse, params: URLSear
     return sendHtml(
       res,
       200,
-      renderConsent({ clientName: client.clientName, redirectHost, requestId }),
+      renderConsent({
+        clientName: client.clientName,
+        clientIdHost: isClientIdUrl(client.clientId) ? new URL(client.clientId).host : undefined,
+        redirectHost,
+        requestId,
+      }),
     );
   } catch (error) {
     if (!(error instanceof StoreFullError)) throw error;
@@ -106,23 +139,11 @@ function authorizeGet(deps: OAuthDeps, res: http.ServerResponse, params: URLSear
   }
 }
 
-async function readDecision(
-  req: http.IncomingMessage,
-  res: http.ServerResponse,
-): Promise<URLSearchParams | 'unsupported' | 'too_large'> {
-  if (!isFormContent(req)) return 'unsupported';
-  try {
-    return new URLSearchParams(await readBody(req, res));
-  } catch (error) {
-    if (!(error instanceof BodyTooLargeError)) throw error;
-    return 'too_large';
-  }
-}
-
 async function authorizePost(deps: OAuthDeps, req: http.IncomingMessage, res: http.ServerResponse) {
-  const params = await readDecision(req, res);
+  const params = await readFormBody(req, res);
   if (params === 'unsupported') return sendHtml(res, 415, renderError('Unsupported content type.'));
   if (params === 'too_large') return sendHtml(res, 413, renderError('Request too large.'));
+  if (repeatedParam(params)) return sendHtml(res, 400, renderError(INVALID_LINK));
   const id = single(params, 'request_id');
   const pending = id ? deps.store.peekPending(id) : undefined;
   if (!pending) return sendHtml(res, 400, renderError(EXPIRED));
@@ -154,12 +175,12 @@ function lockedOut(deps: OAuthDeps, res: http.ServerResponse, wait: number) {
 function wrongSecret(deps: OAuthDeps, res: http.ServerResponse, pending: Pending) {
   deps.limiter.fail();
   deps.log('wrong_secret', { client_id: pending.clientId });
-  const client = deps.store.getClient(pending.clientId);
   return sendHtml(
     res,
     403,
     renderConsent({
-      clientName: client?.clientName ?? 'Unknown client',
+      clientName: pending.clientName,
+      clientIdHost: isClientIdUrl(pending.clientId) ? new URL(pending.clientId).host : undefined,
       redirectHost: new URL(pending.redirectUri).host,
       requestId: pending.id,
       error: 'That is not the approval secret.',
@@ -173,14 +194,33 @@ function approve(deps: OAuthDeps, res: http.ServerResponse, pending: Pending, se
   if (!constantTimeEqual(secret, deps.config.approvalSecret))
     return wrongSecret(deps, res, pending);
   deps.limiter.reset();
+  let code: string;
+  try {
+    // Issue first and take the pending request only on success: a capacity refusal must leave
+    // the request in place so the owner can retry instead of starting the sign-in again.
+    code = deps.store.issueCode({
+      clientId: pending.clientId,
+      redirectUri: pending.redirectUri,
+      codeChallenge: pending.codeChallenge,
+      scope: pending.scope,
+      resource: pending.resource,
+    });
+  } catch (error) {
+    if (!(error instanceof StoreFullError)) throw error;
+    deps.log('approval_full', { client_id: pending.clientId });
+    return sendHtml(
+      res,
+      503,
+      renderConsent({
+        clientName: pending.clientName,
+        clientIdHost: isClientIdUrl(pending.clientId) ? new URL(pending.clientId).host : undefined,
+        redirectHost: new URL(pending.redirectUri).host,
+        requestId: pending.id,
+        error: 'The server is busy. Try again shortly.',
+      }),
+    );
+  }
   deps.store.takePending(pending.id);
-  const code = deps.store.issueCode({
-    clientId: pending.clientId,
-    redirectUri: pending.redirectUri,
-    codeChallenge: pending.codeChallenge,
-    scope: pending.scope,
-    resource: pending.resource,
-  });
   deps.log('approved', { client_id: pending.clientId });
   return redirect(res, clientRedirect(deps, pending.redirectUri, pending.state, { code }));
 }

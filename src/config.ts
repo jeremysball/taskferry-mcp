@@ -7,6 +7,7 @@ import {
   absolute,
   asPort,
   asString,
+  defaultStateFile,
   firstFound,
   fromEnv,
   type Env,
@@ -98,9 +99,14 @@ function defaultConfigFile(env: Env) {
   return path.join(base, APP_DIR, 'config.json');
 }
 
-function defaultEventsStateFile(env: Env) {
-  const base = env.XDG_STATE_HOME || path.join(homedir(), '.local', 'state');
-  return path.join(base, APP_DIR, 'events.json');
+const defaultEventsStateFile = (env: Env) => defaultStateFile(env, 'events.json');
+
+function validateStatePaths(oauth: OAuthConfig | undefined, eventsStatePath: string) {
+  if (oauth && oauth.statePath === eventsStatePath) {
+    throw new ConfigError(
+      'OAuth state path must differ from the events state path: they hold different data',
+    );
+  }
 }
 
 function resolveEventsStatePath(flag: string | undefined, env: Env, file: FileConfig) {
@@ -253,21 +259,7 @@ export function resolveConfig({
     ? readFileConfig(absolute('config file', explicitFile.value), true)
     : readFileConfig(defaultConfigFile(env), false);
 
-  const directories = firstFound<unknown>(
-    flags['allowed-directories'],
-    fromEnv(env, 'TASKFERRY_ALLOWED_DIRECTORIES'),
-    file.allowedDirectories,
-  );
-  const models = firstFound<unknown>(
-    flags['allowed-models'],
-    fromEnv(env, 'TASKFERRY_ALLOWED_MODELS'),
-    file.allowedModels,
-  );
-  const roBinds = firstFound<unknown>(
-    flags['allowed-ro-binds'],
-    fromEnv(env, 'TASKFERRY_ALLOWED_RO_BINDS'),
-    file.allowedRoBinds,
-  );
+  const { directories, models, roBinds } = resolveAllowlists(flags, env, file);
   const skillProfile = firstFound<unknown>(
     flags['skill-profile'],
     fromEnv(env, 'TASKFERRY_MCP_SKILL_PROFILE'),
@@ -300,6 +292,7 @@ export function resolveConfig({
   const { gateway, daemonSocket, listen, eventsStatePath } = resolveBootstrap(flags, env, file);
   validateSurfaceConfig(gateway, token, listen);
   const oauth = resolveOAuth(flags, env, file, { token, gatewayToken: gateway?.token });
+  validateStatePaths(oauth, eventsStatePath);
 
   return {
     ...resolveLimits(flags, env, file),
@@ -321,6 +314,26 @@ export function resolveConfig({
       : defaultSkillRoot(),
     serverRoBinds: serverRoBinds ? asBindRoots('server read-only binds', serverRoBinds.value) : [],
     listen,
+  };
+}
+
+function resolveAllowlists(flags: ReturnType<typeof parseFlags>, env: Env, file: FileConfig) {
+  return {
+    directories: firstFound<unknown>(
+      flags['allowed-directories'],
+      fromEnv(env, 'TASKFERRY_ALLOWED_DIRECTORIES'),
+      file.allowedDirectories,
+    ),
+    models: firstFound<unknown>(
+      flags['allowed-models'],
+      fromEnv(env, 'TASKFERRY_ALLOWED_MODELS'),
+      file.allowedModels,
+    ),
+    roBinds: firstFound<unknown>(
+      flags['allowed-ro-binds'],
+      fromEnv(env, 'TASKFERRY_ALLOWED_RO_BINDS'),
+      file.allowedRoBinds,
+    ),
   };
 }
 

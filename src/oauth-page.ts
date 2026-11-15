@@ -28,6 +28,9 @@ export function renderError(message: string): string {
 
 export type ConsentView = {
   clientName: string;
+  // For a Client ID Metadata Document, the hostname that published it. Shown so a self-chosen
+  // display name cannot hide where the client actually comes from.
+  clientIdHost?: string;
   // Where the code will be sent. Shown in full so the owner can see who really receives it.
   redirectHost: string;
   requestId: string;
@@ -41,8 +44,11 @@ export function renderConsent(view: ConsentView): string {
   return page(
     'Approve access to TaskFerry',
     `<h1>Approve access to TaskFerry</h1>
-<p><strong>${escapeHtml(view.clientName)}</strong> wants to connect. After you approve, it is sent to
-<code>${escapeHtml(view.redirectHost)}</code>.</p>
+<p><strong>${escapeHtml(view.clientName)}</strong> wants to connect.${
+      view.clientIdHost
+        ? ` It identifies itself as <code>${escapeHtml(view.clientIdHost)}</code>.`
+        : ''
+    } After you approve, it is sent to <code>${escapeHtml(view.redirectHost)}</code>.</p>
 <p class="warn">Approving gives this client the same access as the bridge token: it can queue and cancel
 tasks, apply or reject their changes, and read any file this service can read. Approve only a client
 you started yourself, just now.</p>

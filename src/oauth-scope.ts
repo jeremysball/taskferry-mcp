@@ -6,10 +6,12 @@ export const OFFLINE_ACCESS = 'offline_access';
 export const SCOPES_SUPPORTED = [SCOPE, OFFLINE_ACCESS];
 
 // Resolves a requested scope string to the scopes that will be granted. No scope means the
-// default; any value this server does not know is a refusal, not a silent drop.
+// default; a request that names only `offline_access` is refused rather than upgraded to the full
+// scope, and any value this server does not know is a refusal, not a silent drop.
 export function parseScope(raw: string | undefined): string[] | undefined {
   if (raw === undefined || raw.trim() === '') return [SCOPE];
   const requested = raw.split(' ').filter((item) => item !== '');
+  if (!requested.includes(SCOPE)) return undefined;
   if (!requested.every((item) => SCOPES_SUPPORTED.includes(item))) return undefined;
   return [SCOPE];
 }

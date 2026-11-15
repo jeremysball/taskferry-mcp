@@ -1,7 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { MAX_CODES } from '../src/oauth-store.ts';
 import { HEALTH, send, toolCall, type Sent } from './helpers.ts';
+
+const INVALID_REQUEST = 'invalid_request';
+const OTHER_RESOURCE = 'https://other.example.com/mcp';
 import {
   APPROVAL_SECRET,
   CLAUDE_CALLBACK,
@@ -124,10 +128,11 @@ test('a bad authorization request is bounced to the client with an error, state 
   try {
     const cases: [Record<string, string>, string][] = [
       [{ response_type: 'token' }, 'unsupported_response_type'],
-      [{ code_challenge_method: 'plain' }, 'invalid_request'],
-      [{ code_challenge: 'short' }, 'invalid_request'],
-      [{ resource: 'https://other.example.com/mcp' }, 'invalid_target'],
+      [{ code_challenge_method: 'plain' }, INVALID_REQUEST],
+      [{ code_challenge: 'short' }, INVALID_REQUEST],
+      [{ resource: OTHER_RESOURCE }, 'invalid_target'],
       [{ scope: 'taskferry admin' }, 'invalid_scope'],
+      [{ scope: 'offline_access' }, 'invalid_scope'],
     ];
     for (const [params, error] of cases) {
       const sent = await consent(f, params);
@@ -147,7 +152,7 @@ test('a bad authorization request is bounced to the client with an error, state 
         response_type: 'code',
       }),
     );
-    assert.equal(location(bare).searchParams.get('error'), 'invalid_request');
+    assert.equal(location(bare).searchParams.get('error'), INVALID_REQUEST);
   } finally {
     await f.close();
   }
@@ -337,7 +342,7 @@ test('token endpoint errors use the OAuth error codes', async () => {
       await error(
         token({ grant_type: 'authorization_code', client_id: signIn.clientId, code: 'x' }),
       ),
-      'invalid_request',
+      INVALID_REQUEST,
     );
     assert.equal(
       await error(
@@ -349,12 +354,9 @@ test('token endpoint errors use the OAuth error codes', async () => {
           code_verifier: 'too-short',
         }),
       ),
-      'invalid_request',
+      INVALID_REQUEST,
     );
-    assert.equal(
-      await error(exchange(f, signIn, { resource: 'https://other.example.com/mcp' })),
-      'invalid_target',
-    );
+    assert.equal(await error(exchange(f, signIn, { resource: OTHER_RESOURCE })), 'invalid_target');
     assert.equal(
       await error(refresh(f, signIn.clientId, 'not-a-token', { scope: 'taskferry admin' })),
       'invalid_scope',
@@ -363,7 +365,7 @@ test('token endpoint errors use the OAuth error codes', async () => {
 
     const asJson = await send(f.url(ROUTE.token), '{}', { token: null });
     assert.equal(asJson.status, 400);
-    assert.equal(json(asJson).error, 'invalid_request');
+    assert.equal(json(asJson).error, INVALID_REQUEST);
     assert.equal((await getPage(f.url(ROUTE.token))).status, 405);
   } finally {
     await f.close();
@@ -428,6 +430,110 @@ test('the state file holds neither tokens nor the approval secret', async () => 
     assert.ok(!text.includes(tokens.refresh_token as string));
     assert.ok(!text.includes(tokens.access_token as string));
     assert.ok(!text.includes(APPROVAL_SECRET));
+  } finally {
+    await f.close();
+  }
+});
+
+test('tightening the redirect allowlist retires a redirect registered earlier', async () => {
+  const f = await oauthFixture();
+  try {
+    const clientId = await registerClient(f);
+    const { challenge } = pkce();
+    const url = authorizeUrl(f, {
+      client_id: clientId,
+      redirect_uri: CLAUDE_CALLBACK,
+      response_type: 'code',
+      code_challenge: challenge,
+      code_challenge_method: 'S256',
+    });
+    f.oauth.redirects.exact.length = 0;
+    const page = await getPage(url);
+    assert.equal(page.status, 400);
+    assert.equal(page.headers.location, undefined);
+  } finally {
+    await f.close();
+  }
+});
+
+test('a repeated token parameter is refused instead of treated as absent', async () => {
+  const f = await oauthFixture();
+  try {
+    const signIn = await approve(f);
+    const body = new URLSearchParams({
+      grant_type: 'authorization_code',
+      client_id: signIn.clientId,
+      code: signIn.code,
+      code_verifier: signIn.verifier,
+      redirect_uri: signIn.redirectUri,
+      resource: f.oauth.resource,
+    }).toString();
+    const sent = await send(
+      `${f.url(ROUTE.token)}?`,
+      `${body}&resource=${encodeURIComponent(f.oauth.resource)}`,
+      {
+        token: null,
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      },
+    );
+    assert.equal(sent.status, 400);
+  } finally {
+    await f.close();
+  }
+});
+
+test('approval at the code cap keeps the pending request instead of losing the sign-in', async () => {
+  const f = await oauthFixture();
+  try {
+    const clientId = await registerClient(f);
+    const { challenge } = pkce();
+    const consent = () =>
+      getPage(
+        authorizeUrl(f, {
+          client_id: clientId,
+          redirect_uri: CLAUDE_CALLBACK,
+          response_type: 'code',
+          code_challenge: challenge,
+          code_challenge_method: 'S256',
+        }),
+      );
+    for (let i = 0; i < MAX_CODES; i += 1) {
+      const id = requestId((await consent()).text);
+      const decided = await postForm(f.url(ROUTE.authorize), {
+        request_id: id as string,
+        decision: 'approve',
+        secret: APPROVAL_SECRET,
+      });
+      assert.equal(decided.status, 302);
+    }
+    const id = requestId((await consent()).text) as string;
+    const full = await postForm(f.url(ROUTE.authorize), {
+      request_id: id,
+      decision: 'approve',
+      secret: APPROVAL_SECRET,
+    });
+    assert.equal(full.status, 503);
+    // The owner can retry the same request; nothing was consumed.
+    assert.equal(requestId(full.text), id);
+    const retry = await postForm(f.url(ROUTE.authorize), {
+      request_id: id,
+      decision: 'approve',
+      secret: APPROVAL_SECRET,
+    });
+    assert.equal(retry.status, 503);
+  } finally {
+    await f.close();
+  }
+});
+
+test('a code issued before the resource changed cannot mint a token for the new one', async () => {
+  const f = await oauthFixture();
+  try {
+    const signIn = await approve(f);
+    f.oauth.resource = OTHER_RESOURCE;
+    const sent = await exchange(f, signIn);
+    assert.equal(sent.status, 400);
+    assert.equal(json(sent).error, 'invalid_grant');
   } finally {
     await f.close();
   }

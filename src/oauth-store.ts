@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
+import { isRecord, isStrings } from './json.ts';
 import { writePrivate } from './private-file.ts';
 
 export const ACCESS_TTL_MS = 60 * 60 * 1000;
@@ -11,6 +12,11 @@ export const MAX_CLIENTS = 100;
 export const MAX_PENDING = 50;
 export const MAX_CODES = 100;
 export const MAX_REFRESH = 500;
+// Access tokens are memory only, so this cap is a safety valve rather than a persistence bound.
+export const MAX_ACCESS = 1000;
+// Spent authorization codes are kept to detect replay; the cap keeps that table from growing
+// forever on a busy server.
+export const MAX_USED_CODES = 1000;
 const STORE_VERSION = 1;
 
 export type Client = {
@@ -19,11 +25,17 @@ export type Client = {
   redirectUris: string[];
   createdAt: number;
 };
+// What the protocol handlers need. Client ID Metadata Documents resolve to this shape without a
+// stored registration, so nothing downstream may depend on createdAt.
+export type ClientView = Pick<Client, 'clientId' | 'clientName' | 'redirectUris'>;
 // An authorization request that passed validation and waits for the owner's decision. The
 // approval POST names it by id only, so the request cannot be altered between page and decision.
 export type Pending = {
   id: string;
   clientId: string;
+  // Captured at authorization time so the consent/error pages never depend on a client lookup,
+  // which for a Client ID Metadata Document means a network fetch.
+  clientName: string;
   redirectUri: string;
   codeChallenge: string;
   state: string | undefined;
@@ -31,7 +43,7 @@ export type Pending = {
   resource: string;
   expiresAt: number;
 };
-export type CodeGrant = Omit<Pending, 'id' | 'state'>;
+export type CodeGrant = Omit<Pending, 'id' | 'state' | 'clientName'>;
 type Refresh = {
   hash: string;
   familyId: string;
@@ -50,8 +62,7 @@ export type Issued = {
 };
 export type CodeResult = { kind: 'ok'; grant: CodeGrant; codeHash: string } | { kind: 'invalid' };
 export type RotateResult =
-  | { kind: 'ok'; issued: Issued; clientId: string }
-  | { kind: 'invalid' | 'reuse' | 'invalid_scope' };
+  { kind: 'ok'; issued: Issued } | { kind: 'invalid' | 'reuse' | 'invalid_scope' };
 
 // Thrown when a capacity cap is reached. Callers turn it into a retryable server error.
 export class StoreFullError extends Error {
@@ -64,17 +75,36 @@ export class StoreFullError extends Error {
 export const hashToken = (token: string) => createHash('sha256').update(token).digest('hex');
 export const newToken = () => randomBytes(32).toString('base64url');
 
-const isRecord = (v: unknown): v is Record<string, unknown> =>
-  typeof v === 'object' && v !== null && !Array.isArray(v);
-const isStrings = (v: unknown): v is string[] =>
-  Array.isArray(v) && v.every((item) => typeof item === 'string');
-
 function parseClient(v: unknown): Client {
   if (!isRecord(v)) throw new Error('client is not an object');
   const { clientId, clientName, redirectUris, createdAt } = v;
   if (typeof clientId !== 'string' || typeof clientName !== 'string') throw new Error('bad client');
   if (!isStrings(redirectUris) || typeof createdAt !== 'number') throw new Error('bad client');
   return { clientId, clientName, redirectUris, createdAt };
+}
+
+function parseState(parsed: unknown, file: string) {
+  if (!isRecord(parsed) || parsed.version !== STORE_VERSION) {
+    throw new Error(`OAuth state file ${file} has an unsupported shape`);
+  }
+  const { clients, refresh, usedCodes } = parsed;
+  if (
+    !Array.isArray(clients) ||
+    !Array.isArray(refresh) ||
+    (usedCodes !== undefined && !Array.isArray(usedCodes))
+  ) {
+    throw new Error(`OAuth state file ${file} has an unsupported shape`);
+  }
+  return { clients, refresh, usedCodes: usedCodes ?? [] };
+}
+
+function parseUsedCode(v: unknown): { familyId: string; expiresAt: number } {
+  if (!isRecord(v)) throw new Error('bad spent code record');
+  const { familyId, expiresAt } = v;
+  if (typeof familyId !== 'string' || typeof expiresAt !== 'number') {
+    throw new Error('bad spent code record');
+  }
+  return { familyId, expiresAt };
 }
 
 function parseRefresh(v: unknown): Refresh {
@@ -113,30 +143,49 @@ export class OAuthStore {
     } catch (error) {
       throw new Error(`OAuth state file ${this.file} is not valid JSON`, { cause: error });
     }
-    if (!isRecord(parsed) || parsed.version !== STORE_VERSION) {
-      throw new Error(`OAuth state file ${this.file} has an unsupported shape`);
-    }
-    if (!Array.isArray(parsed.clients) || !Array.isArray(parsed.refresh)) {
-      throw new Error(`OAuth state file ${this.file} has an unsupported shape`);
-    }
-    for (const entry of parsed.clients) {
+    const state = parseState(parsed, this.file);
+    for (const entry of state.clients) {
       const client = parseClient(entry);
       this.clients.set(client.clientId, client);
     }
-    for (const entry of parsed.refresh) {
+    for (const entry of state.refresh) {
       const record = parseRefresh(entry);
       this.refresh.set(record.hash, record);
     }
+    this.loadUsedCodes(state.usedCodes);
   }
 
-  // Only what must outlive a restart is written: refresh records and the clients they name.
-  // Unapproved registrations stay in memory, so an anonymous caller cannot grow this file.
+  private loadUsedCodes(entries: unknown[]) {
+    for (const entry of entries) {
+      if (!isRecord(entry) || typeof entry.hash !== 'string') {
+        throw new Error(`OAuth state file ${this.file} has an unsupported shape`);
+      }
+      const record = parseUsedCode(entry);
+      if (record.expiresAt > this.now()) this.usedCodes.set(entry.hash, record);
+    }
+  }
+
+  // Only what must outlive a restart is written: refresh records, spent codes, and the clients
+  // they name. Unapproved registrations stay in memory, so an anonymous caller cannot grow this
+  // file. A caller that narrows the state (revocation) passes the narrowed tables so the write
+  // happens before memory changes: a failed write leaves the grant alive and the call retryable.
+  private persist(
+    refresh: Iterable<Refresh> = this.refresh.values(),
+    usedCodes: Iterable<[string, { familyId: string; expiresAt: number }]> = this.usedCodes,
+  ) {
+    const refreshList = [...refresh];
+    const named = new Set(refreshList.map((r) => r.clientId));
+    const clients = [...this.clients.values()].filter((c) => named.has(c.clientId));
+    const spent = [...usedCodes].map(([hash, record]) => ({ ...record, hash }));
+    writePrivate(
+      this.file,
+      JSON.stringify({ clients, version: STORE_VERSION, refresh: refreshList, usedCodes: spent }),
+    );
+  }
+
   private save() {
     this.prune();
-    const refresh = [...this.refresh.values()];
-    const named = new Set(refresh.map((r) => r.clientId));
-    const clients = [...this.clients.values()].filter((c) => named.has(c.clientId));
-    writePrivate(this.file, JSON.stringify({ version: STORE_VERSION, clients, refresh }));
+    this.persist();
   }
 
   private prune() {
@@ -149,7 +198,13 @@ export class OAuthStore {
     live(this.usedCodes);
     live(this.pending);
     live(this.refresh);
-    const named = new Set([...this.refresh.values()].map((r) => r.clientId));
+    // A sign-in that has not finished yet (pending request or unspent code) still names its
+    // registration, so the unused-registration timer must not drop it mid-flow.
+    const named = new Set([
+      ...[...this.refresh.values()].map((r) => r.clientId),
+      ...[...this.pending.values()].map((p) => p.clientId),
+      ...[...this.codes.values()].map((c) => c.clientId),
+    ]);
     for (const client of this.clients.values()) {
       if (!named.has(client.clientId) && client.createdAt + UNUSED_CLIENT_TTL_MS <= t) {
         this.clients.delete(client.clientId);
@@ -178,7 +233,7 @@ export class OAuthStore {
     this.prune();
     if (this.pending.size >= MAX_PENDING) throw new StoreFullError('pending authorizations');
     const id = newToken();
-    this.pending.set(id, { ...input, id, expiresAt: this.now() + PENDING_TTL_MS });
+    this.pending.set(id, { ...input, expiresAt: this.now() + PENDING_TTL_MS, id });
     return id;
   }
 
@@ -237,33 +292,64 @@ export class OAuthStore {
       scope: input.scope,
       resource: input.resource,
     };
-    this.access.set(hashToken(accessToken), { ...base, expiresAt: t + ACCESS_TTL_MS });
+    // Both caps are applied before anything is added, so a refusal leaves the store unchanged.
     this.evictRefresh();
+    this.evictAccess();
+    this.access.set(hashToken(accessToken), { ...base, expiresAt: t + ACCESS_TTL_MS });
     const hash = hashToken(refreshToken);
     this.refresh.set(hash, { ...base, hash, expiresAt: t + REFRESH_TTL_MS, rotated: false });
     if (input.codeHash) {
+      this.evictUsedCodes();
       this.usedCodes.set(input.codeHash, { familyId, expiresAt: t + REFRESH_TTL_MS });
     }
     this.save();
     return { accessToken, refreshToken, expiresIn: ACCESS_TTL_MS / 1000, scope: input.scope };
   }
 
-  // Keeps the refresh table under its cap by dropping already-rotated records first (they only
-  // serve reuse detection), then the oldest.
+  // Keeps the refresh table under its cap by dropping already-rotated records, which only serve
+  // reuse detection. A live grant is never evicted: when every slot holds one, the caller gets a
+  // retryable error rather than a token that silently stops working.
   private evictRefresh() {
     while (this.refresh.size >= MAX_REFRESH) {
       const rotated = [...this.refresh.values()].find((r) => r.rotated);
-      const victim = rotated ?? this.refresh.values().next().value;
-      if (!victim) return;
-      this.refresh.delete(victim.hash);
+      if (!rotated) throw new StoreFullError('refresh tokens');
+      this.refresh.delete(rotated.hash);
+    }
+  }
+
+  // Oldest first. A capped server invalidates the oldest access tokens instead of growing.
+  private evictAccess() {
+    while (this.access.size >= MAX_ACCESS) {
+      const oldest = this.access.keys().next().value;
+      if (oldest === undefined) return;
+      this.access.delete(oldest);
+    }
+  }
+
+  private evictUsedCodes() {
+    while (this.usedCodes.size >= MAX_USED_CODES) {
+      const oldest = this.usedCodes.keys().next().value;
+      if (oldest === undefined) return;
+      this.usedCodes.delete(oldest);
     }
   }
 
   // Presenting an already-rotated refresh token means two parties hold it: the whole family,
   // every refresh and access token descended from that sign-in, is revoked.
-  rotateRefresh(token: string, clientId: string, requested: string[] | undefined): RotateResult {
+  rotateRefresh(
+    token: string,
+    clientId: string,
+    requested: string[] | undefined,
+    expectedResource?: string,
+  ): RotateResult {
     const record = this.refresh.get(hashToken(token));
     if (!record || record.expiresAt <= this.now() || record.clientId !== clientId) {
+      return { kind: 'invalid' };
+    }
+    // The resource is fixed when the code is issued. If the configured resource changed since,
+    // the grant no longer belongs to this server: revoke it and make the client sign in again.
+    if (expectedResource !== undefined && record.resource !== expectedResource) {
+      this.revokeFamily(record.familyId);
       return { kind: 'invalid' };
     }
     if (record.rotated) {
@@ -274,19 +360,34 @@ export class OAuthStore {
       return { kind: 'invalid_scope' };
     }
     record.rotated = true;
+    // At the cap, evictRefresh reclaims this just-rotated record (it is the oldest rotated one),
+    // so a rotation always has room; only a new sign-in is refused. See
+    // docs/things-that-look-like-bugs.md.
     const issued = this.issueTokens({
       clientId,
       scope: requested ?? record.scope,
       resource: record.resource,
       familyId: record.familyId,
     });
-    return { kind: 'ok', issued, clientId };
+    return { kind: 'ok', issued };
   }
 
+  // Durable first: narrow the tables, write them, and only then drop the in-memory grants. A
+  // failed write leaves memory unchanged, so the caller can retry and the family stays consistent
+  // with the file.
   revokeFamily(familyId: string) {
-    for (const [key, r] of this.refresh) if (r.familyId === familyId) this.refresh.delete(key);
-    for (const [key, a] of this.access) if (a.familyId === familyId) this.access.delete(key);
-    this.save();
+    this.prune();
+    const refresh = new Map([...this.refresh].filter(([, r]) => r.familyId !== familyId));
+    const usedCodes = new Map([...this.usedCodes].filter(([, u]) => u.familyId !== familyId));
+    this.persist(refresh.values(), usedCodes);
+    this.replace(this.refresh, refresh);
+    this.replace(this.usedCodes, usedCodes);
+    this.replace(this.access, new Map([...this.access].filter(([, a]) => a.familyId !== familyId)));
+  }
+
+  private replace<V>(target: Map<string, V>, source: Map<string, V>) {
+    target.clear();
+    for (const [key, value] of source) target.set(key, value);
   }
 
   // RFC 7009: revoking a token that is unknown, expired or someone else's is not an error.
@@ -294,8 +395,10 @@ export class OAuthStore {
     const key = hashToken(token);
     const refresh = this.refresh.get(key);
     if (refresh?.clientId === clientId) this.revokeFamily(refresh.familyId);
+    // An access token identifies the same family, so revoking either token ends the grant. With
+    // short-lived access tokens this is the only way a client can retire what it holds.
     const access = this.access.get(key);
-    if (access?.clientId === clientId) this.access.delete(key);
+    if (access?.clientId === clientId) this.revokeFamily(access.familyId);
   }
 
   verifyAccess(token: string, resource: string): { clientId: string } | undefined {

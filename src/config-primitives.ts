@@ -1,5 +1,14 @@
+import { homedir } from 'node:os';
 import path from 'node:path';
 import { ConfigError } from './errors.ts';
+
+export const APP_DIR = 'taskferry-mcp';
+
+// XDG state for both persisted state files (events and OAuth), so the default lives in one place.
+export function defaultStateFile(env: Env, name: string): string {
+  const base = env.XDG_STATE_HOME || path.join(homedir(), '.local', 'state');
+  return path.join(base, APP_DIR, name);
+}
 
 export type Env = Record<string, string | undefined>;
 

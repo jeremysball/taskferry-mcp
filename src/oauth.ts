@@ -1,6 +1,7 @@
 import type http from 'node:http';
 import type { OAuthConfig } from './oauth-config.ts';
 import { handleAuthorize } from './oauth-authorize.ts';
+import { CimdResolver, type CimdFetch } from './oauth-cimd.ts';
 import { parseRegistration } from './oauth-clients.ts';
 import { FailureLimiter } from './oauth-limiter.ts';
 import {
@@ -33,7 +34,12 @@ export type OAuth = {
   challenge: (presented: boolean) => string;
 };
 
-export type OAuthOptions = { now?: () => number; log?: OAuthLog };
+export type OAuthOptions = {
+  now?: () => number;
+  log?: OAuthLog;
+  // Injection point for tests; production uses the process-wide fetch.
+  fetchClientMetadata?: CimdFetch;
+};
 
 // CORS only on the public discovery documents, so a browser-based client (an MCP inspector, say)
 // can read them. Registration, authorization and token endpoints stay same-origin: a
@@ -69,6 +75,7 @@ function serverMetadata(config: OAuthConfig) {
     revocation_endpoint_auth_methods_supported: ['none'],
     scopes_supported: SCOPES_SUPPORTED,
     authorization_response_iss_parameter_supported: true,
+    client_id_metadata_document_supported: true,
   };
 }
 
@@ -143,11 +150,19 @@ function buildRoutes(deps: OAuthDeps): Record<string, Handler> {
 export function createOAuth(config: OAuthConfig, options: OAuthOptions = {}): OAuth {
   const now = options.now ?? Date.now;
   const store = new OAuthStore(config.statePath, now);
+  const log = options.log ?? consoleLog;
+  const cimd = new CimdResolver({
+    log,
+    now,
+    redirects: config.redirects,
+    fetch: options.fetchClientMetadata,
+  });
   const deps: OAuthDeps = {
     config,
     store,
+    log,
     limiter: new FailureLimiter(FAILURES_ALLOWED, FAILURE_WINDOW_MS, now),
-    log: options.log ?? consoleLog,
+    resolveClient: async (clientId) => store.getClient(clientId) ?? (await cimd.resolve(clientId)),
   };
   const routes = buildRoutes(deps);
   const metadataUrl = `${config.origin}/.well-known/oauth-protected-resource/mcp`;

@@ -1,12 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import {
   ACCESS_TTL_MS,
   CODE_TTL_MS,
   MAX_CLIENTS,
   MAX_PENDING,
+  MAX_REFRESH,
   OAuthStore,
   PENDING_TTL_MS,
   REFRESH_TTL_MS,
@@ -17,6 +18,7 @@ import { removeDir, tempDir } from './helpers.ts';
 
 const RESOURCE = 'https://mcp.example.com/mcp';
 const REDIRECT = 'https://claude.ai/api/mcp/auth_callback';
+const CLIENT_NAME = 'Test client';
 
 function harness() {
   const dir = tempDir('tf-oauth-store-');
@@ -47,7 +49,7 @@ function signIn(store: OAuthStore, clientId: string) {
 }
 
 const register = (store: OAuthStore) =>
-  store.registerClient({ clientName: 'Test client', redirectUris: [REDIRECT] });
+  store.registerClient({ clientName: CLIENT_NAME, redirectUris: [REDIRECT] });
 
 test('an authorization code works once, and replaying it revokes what it produced', () => {
   const h = harness();
@@ -203,6 +205,7 @@ test('pending authorizations expire and are taken exactly once', () => {
     const client = register(h.store);
     const input = {
       clientId: client.clientId,
+      clientName: CLIENT_NAME,
       redirectUri: REDIRECT,
       codeChallenge: 'c'.repeat(43),
       state: 'abc',
@@ -234,6 +237,7 @@ test('capacity caps refuse with StoreFullError instead of growing without bound'
     const client = register(h.store);
     const input = {
       clientId: client.clientId,
+      clientName: CLIENT_NAME,
       redirectUri: REDIRECT,
       codeChallenge: 'c'.repeat(43),
       state: 'capacity',
@@ -263,7 +267,7 @@ test('only refresh state survives a restart, and the file holds hashes, never to
     assert.ok(!text.includes(abandoned.clientId), 'unapproved registrations are not persisted');
 
     const reopened = h.open();
-    assert.equal(reopened.getClient(approved.clientId)?.clientName, 'Test client');
+    assert.equal(reopened.getClient(approved.clientId)?.clientName, CLIENT_NAME);
     assert.equal(reopened.getClient(abandoned.clientId), undefined);
     // Access tokens are memory-only: a restart makes the client refresh.
     assert.equal(reopened.verifyAccess(issued.accessToken, RESOURCE), undefined);
@@ -302,6 +306,143 @@ test('a corrupt or foreign state file stops startup instead of being replaced', 
     assert.throws(() => h.open(), /unsupported shape/);
     writeFileSync(h.file, JSON.stringify({ version: 1, clients: [], refresh: [{ hash: 1 }] }));
     assert.throws(() => h.open(), /bad refresh record/);
+  } finally {
+    h.done();
+  }
+});
+
+test('a spent code is still detected as a replay after a restart', () => {
+  const h = harness();
+  try {
+    const client = register(h.store);
+    const { code, issued } = signIn(h.store, client.clientId);
+    assert.equal(h.store.consumeCode(code).kind, 'invalid');
+    // The replay revoked the family in memory, but the spent code must survive too: a restart
+    // that forgets it would accept the second replay as merely unknown.
+    const reopened = h.open();
+    assert.equal(reopened.verifyAccess(issued.accessToken, RESOURCE), undefined);
+    assert.equal(reopened.consumeCode(code).kind, 'invalid');
+    const text = readFileSync(h.file, 'utf8');
+    assert.ok(text.includes('usedCodes'));
+  } finally {
+    h.done();
+  }
+});
+
+test('an access token revokes its whole family', () => {
+  const h = harness();
+  try {
+    const client = register(h.store);
+    const { issued } = signIn(h.store, client.clientId);
+    h.store.revokeToken(issued.accessToken, client.clientId);
+    assert.equal(h.store.verifyAccess(issued.accessToken, RESOURCE), undefined);
+    assert.equal(
+      h.store.rotateRefresh(issued.refreshToken, client.clientId, undefined).kind,
+      'invalid',
+    );
+  } finally {
+    h.done();
+  }
+});
+
+test('a new sign-in at the refresh cap is refused instead of evicting a live grant', () => {
+  const h = harness();
+  try {
+    const client = register(h.store);
+    const grants = Array.from({ length: MAX_REFRESH }, () => signIn(h.store, client.clientId));
+    assert.throws(() => signIn(h.store, client.clientId), StoreFullError);
+    // The refusal did not damage existing grants.
+    assert.ok(h.store.verifyAccess(grants[0].issued.accessToken, RESOURCE));
+    // Rotation still works at the cap by reclaiming the record it just rotated.
+    assert.equal(
+      h.store.rotateRefresh(grants[0].issued.refreshToken, client.clientId, undefined).kind,
+      'ok',
+    );
+  } finally {
+    h.done();
+  }
+});
+
+test('a resource change revokes refresh grants issued for the old resource', () => {
+  const h = harness();
+  try {
+    const client = register(h.store);
+    const { issued } = signIn(h.store, client.clientId);
+    assert.equal(
+      h.store.rotateRefresh(
+        issued.refreshToken,
+        client.clientId,
+        undefined,
+        'https://other.example.com/mcp',
+      ).kind,
+      'invalid',
+    );
+    assert.equal(h.store.verifyAccess(issued.accessToken, RESOURCE), undefined);
+    assert.equal(
+      h.store.rotateRefresh(issued.refreshToken, client.clientId, undefined, RESOURCE).kind,
+      'invalid',
+    );
+  } finally {
+    h.done();
+  }
+});
+
+test('a failed revocation write leaves the grant usable and the call retryable', () => {
+  const h = harness();
+  try {
+    const client = register(h.store);
+    const { issued } = signIn(h.store, client.clientId);
+    const dir = path.dirname(h.file);
+    chmodSync(dir, 0o500);
+    try {
+      assert.throws(() => h.store.revokeToken(issued.refreshToken, client.clientId));
+    } finally {
+      chmodSync(dir, 0o700);
+    }
+    assert.ok(h.store.verifyAccess(issued.accessToken, RESOURCE));
+    h.store.revokeToken(issued.refreshToken, client.clientId);
+    assert.equal(h.store.verifyAccess(issued.accessToken, RESOURCE), undefined);
+  } finally {
+    h.done();
+  }
+});
+
+test('an unfinished sign-in keeps its registration past the unused-client lifetime', () => {
+  const h = harness();
+  try {
+    const client = register(h.store);
+    h.clock.t += UNUSED_CLIENT_TTL_MS - 60_000;
+    const input = {
+      clientId: client.clientId,
+      clientName: CLIENT_NAME,
+      redirectUri: REDIRECT,
+      codeChallenge: 'c'.repeat(43),
+      state: 'abc',
+      scope: ['taskferry'],
+      resource: RESOURCE,
+    };
+    h.store.createPending(input);
+    h.clock.t += 120_000;
+    // A second request prunes first; the live pending request must keep the registration.
+    h.store.createPending(input);
+    assert.equal(h.store.getClient(client.clientId)?.clientName, CLIENT_NAME);
+    h.clock.t += PENDING_TTL_MS;
+    register(h.store);
+    assert.equal(h.store.getClient(client.clientId), undefined);
+  } finally {
+    h.done();
+  }
+});
+
+test('a corrupt spent-code record stops startup', () => {
+  const h = harness();
+  try {
+    const client = register(h.store);
+    signIn(h.store, client.clientId);
+    const state = JSON.parse(readFileSync(h.file, 'utf8'));
+    state.usedCodes = [{ hash: 42 }];
+    writeFileSync(h.file, JSON.stringify(state));
+    assert.throws(() => h.open(), /unsupported shape|bad spent code/);
   } finally {
     h.done();
   }

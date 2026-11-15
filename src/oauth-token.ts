@@ -1,12 +1,11 @@
 import { createHash } from 'node:crypto';
 import type http from 'node:http';
-import type { Client, Issued } from './oauth-store.ts';
+import type { ClientView, Issued } from './oauth-store.ts';
 import {
-  BodyTooLargeError,
   SECURITY_HEADERS,
-  isFormContent,
   methodNotAllowed,
-  readBody,
+  readFormBody,
+  repeatedParam,
   sendJson,
   sendOAuthError,
   single,
@@ -21,17 +20,16 @@ const VERIFIER_PATTERN = /^[A-Za-z0-9._~-]{43,128}$/;
 type Res = http.ServerResponse;
 
 async function readForm(req: http.IncomingMessage, res: Res): Promise<URLSearchParams | undefined> {
-  if (!isFormContent(req)) {
+  const params = await readFormBody(req, res);
+  if (params === 'unsupported') {
     sendOAuthError(res, 400, 'invalid_request', 'use application/x-www-form-urlencoded');
     return undefined;
   }
-  try {
-    return new URLSearchParams(await readBody(req, res));
-  } catch (error) {
-    if (!(error instanceof BodyTooLargeError)) throw error;
+  if (params === 'too_large') {
     sendOAuthError(res, 413, 'invalid_request', 'request too large');
     return undefined;
   }
+  return params;
 }
 
 function sendTokens(res: Res, issued: Issued) {
@@ -45,14 +43,18 @@ function sendTokens(res: Res, issued: Issued) {
 }
 
 // Public clients only: the client is identified by client_id and proved by PKCE, not a secret.
-function knownClient(deps: OAuthDeps, params: URLSearchParams, res: Res): Client | undefined {
+async function knownClient(
+  deps: OAuthDeps,
+  params: URLSearchParams,
+  res: Res,
+): Promise<ClientView | undefined> {
   const id = single(params, 'client_id');
-  const client = id ? deps.store.getClient(id) : undefined;
+  const client = id ? await deps.resolveClient(id) : undefined;
   if (!client) sendOAuthError(res, 400, 'invalid_client', 'unknown client_id');
   return client;
 }
 
-type Form = { params: URLSearchParams; client: Client };
+type Form = { params: URLSearchParams; client: ClientView };
 
 // The parsed form body and its client, or undefined once an error response has been sent.
 async function clientForm(
@@ -61,7 +63,7 @@ async function clientForm(
   res: Res,
 ): Promise<Form | undefined> {
   const params = await readForm(req, res);
-  const client = params && knownClient(deps, params, res);
+  const client = params && (await knownClient(deps, params, res));
   return params && client ? { params, client } : undefined;
 }
 
@@ -70,6 +72,9 @@ export async function handleToken(deps: OAuthDeps, req: http.IncomingMessage, re
   const form = await clientForm(deps, req, res);
   if (!form) return undefined;
   const { params, client } = form;
+  if (repeatedParam(params)) {
+    return sendOAuthError(res, 400, 'invalid_request', 'parameters must not repeat');
+  }
   const resource = single(params, 'resource');
   if (resource !== undefined && !sameResource(resource, deps.config.resource)) {
     return sendOAuthError(res, 400, 'invalid_target', 'resource must be this server MCP endpoint');
@@ -80,7 +85,7 @@ export async function handleToken(deps: OAuthDeps, req: http.IncomingMessage, re
   return sendOAuthError(res, 400, 'unsupported_grant_type');
 }
 
-function codeGrant(deps: OAuthDeps, params: URLSearchParams, res: Res, client: Client) {
+function codeGrant(deps: OAuthDeps, params: URLSearchParams, res: Res, client: ClientView) {
   const code = single(params, 'code');
   const verifier = single(params, 'code_verifier');
   const redirectUri = single(params, 'redirect_uri');
@@ -106,6 +111,12 @@ function codeGrant(deps: OAuthDeps, params: URLSearchParams, res: Res, client: C
       'code was not issued for this client and redirect',
     );
   }
+  // The resource is fixed at authorization time. If the operator repointed the server since, the
+  // code no longer describes this endpoint and must not mint a token for the new one.
+  if (grant.resource !== deps.config.resource) {
+    deps.log('resource_changed', { client_id: client.clientId });
+    return sendOAuthError(res, 400, 'invalid_grant', 'code was issued for another resource');
+  }
   const challenge = createHash('sha256').update(verifier).digest('base64url');
   if (!constantTimeEqual(challenge, grant.codeChallenge)) {
     deps.log('pkce_failed', { client_id: client.clientId });
@@ -121,7 +132,7 @@ function codeGrant(deps: OAuthDeps, params: URLSearchParams, res: Res, client: C
   return sendTokens(res, issued);
 }
 
-function refreshGrant(deps: OAuthDeps, params: URLSearchParams, res: Res, client: Client) {
+function refreshGrant(deps: OAuthDeps, params: URLSearchParams, res: Res, client: ClientView) {
   const token = single(params, 'refresh_token');
   if (!token) return sendOAuthError(res, 400, 'invalid_request', 'refresh_token is required');
   const rawScope = single(params, 'scope');
@@ -129,7 +140,7 @@ function refreshGrant(deps: OAuthDeps, params: URLSearchParams, res: Res, client
   if (rawScope !== undefined && !requested) {
     return sendOAuthError(res, 400, 'invalid_scope', 'unsupported scope');
   }
-  const result = deps.store.rotateRefresh(token, client.clientId, requested);
+  const result = deps.store.rotateRefresh(token, client.clientId, requested, deps.config.resource);
   if (result.kind === 'ok') {
     deps.log('token_issued', { client_id: client.clientId, grant: 'refresh_token' });
     return sendTokens(res, result.issued);
@@ -146,6 +157,9 @@ export async function handleRevoke(deps: OAuthDeps, req: http.IncomingMessage, r
   if (req.method !== 'POST') return methodNotAllowed(res, 'POST');
   const form = await clientForm(deps, req, res);
   if (!form) return undefined;
+  if (repeatedParam(form.params)) {
+    return sendOAuthError(res, 400, 'invalid_request', 'parameters must not repeat');
+  }
   const token = single(form.params, 'token');
   if (token) deps.store.revokeToken(token, form.client.clientId);
   deps.log('revoked', { client_id: form.client.clientId });

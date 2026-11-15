@@ -1,4 +1,4 @@
-import { isLoopbackHost, type RedirectRules } from './oauth-config.ts';
+import { isLoopbackHost, parseWebUrl, type RedirectRules } from './oauth-config.ts';
 
 const MAX_REDIRECT_URIS = 10;
 const MAX_URI_CHARS = 2048;
@@ -19,17 +19,11 @@ const fail = (
 // A redirect this server will ever send a code to: https, or http on a loopback host (RFC 8252).
 // Credentials in the URL and fragments are refused outright.
 function parseRedirect(value: string): URL | undefined {
-  let url: URL;
   try {
-    url = new URL(value);
+    return parseWebUrl('redirect URI', value);
   } catch {
     return undefined;
   }
-  const secure = url.protocol === 'https:';
-  const loopbackHttp = url.protocol === 'http:' && isLoopbackHost(url.hostname);
-  if (!secure && !loopbackHttp) return undefined;
-  if (url.username !== '' || url.password !== '' || url.hash !== '') return undefined;
-  return url;
 }
 
 // Policy, not just syntax: a client may only register a redirect the operator allowed. Without
@@ -45,7 +39,7 @@ export function redirectAllowed(rules: RedirectRules, value: string): boolean {
 // eslint-disable-next-line no-control-regex
 const UNSAFE_NAME_CHARS = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g;
 
-function cleanName(value: unknown): string {
+export function cleanClientName(value: unknown): string {
   if (typeof value !== 'string') return DEFAULT_NAME;
   const cleaned = value.replace(UNSAFE_NAME_CHARS, '').trim().slice(0, MAX_NAME_CHARS);
   return cleaned === '' ? DEFAULT_NAME : cleaned;
@@ -107,6 +101,10 @@ export function parseRegistration(body: unknown, rules: RedirectRules): Registra
   if (unsupported) return fail('invalid_client_metadata', unsupported);
   return {
     ok: true,
-    value: { clientName: cleanName(meta.client_name), redirectUris: redirects, grantTypes: grants },
+    value: {
+      clientName: cleanClientName(meta.client_name),
+      redirectUris: redirects,
+      grantTypes: grants,
+    },
   };
 }
