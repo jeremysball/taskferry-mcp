@@ -22,7 +22,8 @@ import { registerResumeTool } from './tools-resume.ts';
 import { registerTools, type ToolDeps } from './tools.ts';
 import { registerWorktreeTool } from './tools-worktree.ts';
 import { buildToolScope } from './tools-shared.ts';
-import { MAX_REQUEST_BYTES, refuse, transportRefusal } from './transport.ts';
+import { createOAuth, type OAuth } from './oauth.ts';
+import { MAX_REQUEST_BYTES, loopbackRequest, refuse, transportRefusal } from './transport.ts';
 
 const SERVER_INFO = { name: 'taskferry-mcp', version: '0.1.0' } as const;
 const EVENTS_PROTOCOL_VERSION = '2026-07-28';
@@ -126,12 +127,37 @@ function sendParseError(res: http.ServerResponse) {
   );
 }
 
+// OAuth endpoints are public by design (a client has no credential yet), but on the loopback TCP
+// listener they get the same DNS-rebinding guard as /mcp, with the public hostname also allowed.
+function serveOAuth(
+  oauth: OAuth,
+  loopback: boolean,
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+) {
+  if (loopback && !loopbackRequest(req, oauth.config.hostname)) {
+    res.writeHead(403).end();
+    return;
+  }
+  oauth.handle(req, res).catch((error: unknown) => {
+    console.error('OAuth request failed', error);
+    if (res.headersSent) res.destroy();
+    else res.writeHead(500).end();
+  });
+}
+
 function createSurface(
   context: SurfaceContext,
   token: string,
   loopback: boolean,
   normalizeAccept = false,
+  oauth?: OAuth,
 ) {
+  const verifier = oauth && {
+    verify: oauth.verify,
+    challenge: oauth.challenge,
+    hostname: oauth.config.hostname,
+  };
   // Modern 2026-07-28 requests go through the SDK entry so server/discover and the modern
   // envelope checks behave as specified. Legacy 2025 traffic keeps the bridge's original
   // per-request streamable path below.
@@ -170,12 +196,14 @@ function createSurface(
     // that sent `Accept: */*` or no Accept kept working. Preserve that on the joined
     // gateway surface only; the bridge keeps its strict MCP content negotiation.
     if (normalizeAccept) normalizeGatewayAccept(req);
-    const status = transportRefusal(req, {
-      token,
-      loopback,
-    });
+    const pathname = (req.url ?? '').split('?')[0];
+    if (oauth?.owns(pathname)) {
+      serveOAuth(oauth, loopback, req, res);
+      return;
+    }
+    const status = transportRefusal(req, { token, loopback, oauth: verifier });
     if (status !== undefined) {
-      refuse(res, status);
+      refuse(res, status, req, verifier);
       return;
     }
     dispatch(req, res).catch((error: unknown) => {
@@ -200,6 +228,8 @@ export function createBridge(
     { config, deps, events, principal: 'bridge' },
     config.token,
     config.listen.kind === 'tcp',
+    false,
+    config.oauth && createOAuth(config.oauth),
   );
 }
 
@@ -291,6 +321,7 @@ if (process.argv[1]?.endsWith('/server.ts')) {
     if (config.gateway) {
       console.log(`TaskFerry MCP gateway listening on 127.0.0.1:${config.gateway.port}`);
     }
+    if (config.oauth) console.log(`TaskFerry MCP OAuth issuer ${config.oauth.origin}`);
     const shutdown = () => {
       void surfaces.close().then(() => process.exit(0));
     };

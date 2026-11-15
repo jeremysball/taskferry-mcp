@@ -11,6 +11,13 @@ HTTP MCP bridge to a local TaskFerry daemon. Validated once against a local Task
 ## Layout
 
 - `src/server.ts`: HTTP layer (path, auth, method, content type, Host/Origin, MCP transport), both surfaces, and the CLI entry.
+- `src/transport.ts`: the `/mcp` refusal order (path, auth, method, content type, Host/Origin) and the 401 challenge, including the optional OAuth bearer verifier.
+- `src/oauth.ts`: the OAuth router (`createOAuth`): discovery documents, registration, and the `owns`/`handle`/`verify`/`challenge` interface the transport uses. Only the bridge surface gets it.
+- `src/oauth-config.ts`: public URL, approval secret, redirect allowlist and state path resolution. OAuth is off without a public URL.
+- `src/oauth-store.ts`: clients, pending sign-ins, codes, access and refresh tokens, rotation with reuse detection. Only refresh hashes and the clients they name reach disk.
+- `src/oauth-authorize.ts`, `src/oauth-token.ts`: the consent page and decision, and the token and revocation endpoints.
+- `src/oauth-clients.ts`, `src/oauth-scope.ts`, `src/oauth-limiter.ts`, `src/oauth-page.ts`, `src/oauth-http.ts`: registration validation, scope and resource matching, the global approval-failure limiter, consent HTML, and shared response helpers.
+- `src/private-file.ts`: atomic 0600 write used by the event store and the OAuth store.
 - `src/listen.ts`: Unix socket and loopback TCP listeners, including socket permissions and stale-socket replacement.
 - `src/config.ts`: flag/env/config-file precedence, defaults, and surface validation.
 - `src/config-primitives.ts`: shared precedence, env, path, port, and string coercion helpers.
@@ -31,13 +38,15 @@ HTTP MCP bridge to a local TaskFerry daemon. Validated once against a local Task
 - `src/daemon.ts`: Unix socket client for the TaskFerry protocol.
 - `src/models.ts`: the `opencode models` catalog runner and its short-lived cache.
 - `src/errors.ts`: shared `ConfigError` and errno `code` reader for filesystem errors.
-- `test/http.test.ts`, `test/listen.test.ts`, `test/gateway.test.ts`, `test/surfaces.test.ts`, `test/tools.test.ts`, `test/tools-extra.test.ts`, `test/tools-files.test.ts`, `test/file-inspect.test.ts`, `test/tools-resume.test.ts`, `test/config.test.ts`, `test/scope.test.ts`, `test/skills.test.ts`: tests against a stub daemon on a Unix socket and real loopback HTTP listeners.
+- `test/oauth-store.test.ts`, `test/oauth-discovery.test.ts`, `test/oauth-flow.test.ts`, `test/oauth-sdk.test.ts`, `test/oauth-surfaces.test.ts`, `test/oauth-config.test.ts`, `test/http.test.ts`, `test/listen.test.ts`, `test/gateway.test.ts`, `test/surfaces.test.ts`, `test/tools.test.ts`, `test/tools-extra.test.ts`, `test/tools-files.test.ts`, `test/file-inspect.test.ts`, `test/tools-resume.test.ts`, `test/config.test.ts`, `test/scope.test.ts`, `test/skills.test.ts`: tests against a stub daemon on a Unix socket and real loopback HTTP listeners.
 - `test/helpers.ts`: the stub daemon, bridge launcher, and MCP call helpers those tests share.
+- `test/oauth-helpers.ts`: the OAuth fixture (a bridge with OAuth on, started through `startSurfaces`) and the PKCE, consent and token helpers the OAuth tests share.
 - `docs/evidence/`: verbatim historical run logs. Do not edit them; `docs/evidence/README.md` explains what they are and which branch and commit each came from.
 
 ## Rules specific to this repo
 
 - The daemon wire protocol is owned by TaskFerry (`src/protocol.js` there: `{version: 1, id, method, params}` requests, `{version: 1, ok, id, result | error}` replies). Check that file, not this repo's stub daemon, when the two disagree.
 - Anything that touches a path from a caller must go through the allowlist and `realpathSync` checks in `src/scope.ts` and the tool modules, except the deliberate `taskferry_files` read/list surface. That tool serves any absolute path the MCP process OS user can read, for any authenticated MCP caller on either the bridge or gateway surface, and is documented in `README.md`; a gateway token is therefore host-read authority, including the bridge token file or process environment when readable. It must not gain write, dispatch, or bind behavior. Any other new tool that forwards a caller-supplied directory or task ID needs a test that proves it is refused outside the allowed roots.
+- The OAuth endpoints are public by design and a grant is the same authority as the bridge token. Keep them unauthenticated only as far as the protocol needs, keep secrets and tokens out of logs, and add a test that fails when a new check is removed (the existing OAuth tests were mutation-probed that way).
 - Pinned versions are exact. `typescript` stays on 6.x for eslint while `typescript-native` (7.x) runs `tsc`; `npm run check:typescript-split` says when to merge them (`docs/things-that-look-like-bugs.md`). Use `npm run typecheck`, not `npx tsc`.
 - Behavior a reader would call a bug but is deliberate goes in `docs/things-that-look-like-bugs.md` in the same change.

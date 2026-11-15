@@ -15,6 +15,7 @@ import {
 } from './config-primitives.ts';
 import { ConfigError, errorCode } from './errors.ts';
 import { resolveGateway, type GatewayConfig } from './gateway-config.ts';
+import { resolveOAuth, type OAuthConfig } from './oauth-config.ts';
 import { isSkillProfile, defaultSkillRoot, SKILL_PROFILES, type SkillProfile } from './skills.ts';
 import { resolveToken } from './token.ts';
 
@@ -47,6 +48,7 @@ export type BridgeConfig = {
   serverRoBinds: string[];
   listen: Listen;
   gateway?: GatewayConfig;
+  oauth?: OAuthConfig;
   eventsStatePath?: string;
 } & Partial<BridgeLimits>;
 
@@ -72,6 +74,10 @@ const FLAGS = {
   'token-file': { type: 'string' },
   'gateway-port': { type: 'string' },
   'gateway-token-file': { type: 'string' },
+  'public-url': { type: 'string' },
+  'oauth-secret-file': { type: 'string' },
+  'oauth-allowed-redirects': { type: 'string' },
+  'oauth-state': { type: 'string' },
   'daemon-timeout-ms': { type: 'string' },
   'summary-timeout-ms': { type: 'string' },
   'list-timeout-ms': { type: 'string' },
@@ -293,12 +299,14 @@ export function resolveConfig({
   });
   const { gateway, daemonSocket, listen, eventsStatePath } = resolveBootstrap(flags, env, file);
   validateSurfaceConfig(gateway, token, listen);
+  const oauth = resolveOAuth(flags, env, file, { token, gatewayToken: gateway?.token });
 
   return {
     ...resolveLimits(flags, env, file),
     daemonSocket,
     token,
     gateway,
+    oauth,
     eventsStatePath,
     allowDirectories: directories
       ? asList('allowed directories', directories.value, ':').map((d) =>

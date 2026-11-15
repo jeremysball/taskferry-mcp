@@ -433,3 +433,83 @@ task. The daemon CLI stays permissive for host-side use.
 
 **Becomes a bug if:** a settled task is refused, or a resume is blocked after
 the source task has ended but before its record updates.
+
+## Wrong approval secrets lock approval for everyone for ten minutes
+
+**Observe:** after ten wrong secrets on the consent page, even the right secret gets a 429 with `Retry-After`, and the owner is locked out along with whoever guessed. Pressing Deny still works.
+
+**Why:** the limiter is global, not per client or per address. Behind a tunnel every request arrives from one source address, so a per-address limit would limit nothing, and the approval secret is the only thing between an internet-reachable consent page and a full tool grant. The cost is that anyone who can register a client and open its consent page can keep the owner from approving for the length of the window. Denial never needs the secret so the lockout cannot trap a pending request open.
+
+**Becomes a bug if:** a wrong guess is not counted, the right secret is accepted while locked, or Deny starts requiring the secret.
+
+## Registering a client can fail with 503 although nothing is wrong
+
+**Observe:** `POST /oauth/register` returns `503 temporarily_unavailable` after about a hundred registrations, and a client that never completed approval stops existing after an hour.
+
+**Why:** registration is unauthenticated by design, because a client has no credential before it signs in. Unapproved registrations are held in memory only, capped at 100, and dropped after an hour, so an anonymous caller can neither grow the state file nor hold slots forever. A registration becomes durable only when a refresh token names it. The cap can still be filled by a caller who wants to block new sign-ins for up to an hour; per-source limits belong at the tunnel.
+
+**Becomes a bug if:** unapproved clients reach `oauth.json`, or approved clients are dropped while their refresh token is live.
+
+## A restart makes clients refresh, and a sign-in in flight fails
+
+**Observe:** after the bridge restarts, the first MCP call from a connected client gets a 401 and then succeeds on its own. A consent page left open across the restart answers "expired or already used".
+
+**Why:** access tokens, authorization codes and pending sign-ins live in memory; only refresh-token hashes and their clients are written to disk. A client that holds a refresh token recovers without asking the owner again. Persisting access tokens would put live bearer credentials in a file for no gain.
+
+**Becomes a bug if:** a client with a valid refresh token is asked to re-approve after a restart, or an access token survives one.
+
+## A lost refresh response forces a new approval
+
+**Observe:** if a client's refresh succeeded on the server but the response never arrived, its retry is refused with `invalid_grant` and every token from that sign-in stops working. The owner has to approve again.
+
+**Why:** refresh tokens rotate, and presenting an already-used one is treated as theft: the whole family is revoked. There is no grace window in which a retry is tolerated. For one owner, re-approving is cheap and a stolen refresh token is not, so the strict rule was chosen. A short grace window would be the fix if this turns out to happen in practice.
+
+**Becomes a bug if:** a first, correct use of a refresh token is refused, or a replay is accepted.
+
+## `/mcp` challenges with `resource_metadata` only when OAuth is configured
+
+**Observe:** the same unauthenticated request gets `WWW-Authenticate: Bearer` on one deployment and `Bearer resource_metadata="..."` on another, and the second adds `error="invalid_token"` when a bad token was sent.
+
+**Why:** the metadata URL is how an OAuth client finds the authorization server, and a deployment without a public URL has none to point at. A request with no credential gets the bare challenge; one with a rejected credential also gets the RFC 6750 error. The gateway surface never advertises OAuth, because it has none.
+
+**Becomes a bug if:** the challenge names a metadata URL on a deployment with OAuth off, or omits it with OAuth on.
+
+## The static bearer token skips the consent page
+
+**Observe:** with OAuth enabled, `Authorization: Bearer <TASKFERRY_MCP_TOKEN>` still opens `/mcp` with no sign-in, no expiry and no revocation.
+
+**Why:** OAuth is an additional way in, not a replacement, so existing local clients and scripts keep working. The static token was always the same authority as a grant. Retiring it is a deployment choice, not something the bridge does.
+
+**Becomes a bug if:** an OAuth access token carries more authority than the static token, or the static token is accepted on the OAuth endpoints as a credential.
+
+## The scope parameter is accepted but grants nothing extra
+
+**Observe:** a client that requests `taskferry offline_access` or nothing at all gets the same grant, with `scope: taskferry`. An unknown scope is refused with `invalid_scope`.
+
+**Why:** there is one real scope and it is the whole tool surface, the same authority as the bridge token. `offline_access` is accepted because Claude adds it when the server lists it, and a refresh token is always issued anyway. Per-tool scopes would be a new design, not a bug fix.
+
+**Becomes a bug if:** a client can obtain a scope that was not requested, or a refresh can widen the granted scope.
+
+## Revoking an OAuth client does not remove its event subscriptions
+
+**Observe:** after `/oauth/revoke` or a family revocation, webhook subscriptions the client created with `events/subscribe` keep delivering.
+
+**Why:** subscriptions belong to the surface principal (`bridge`), not to a token, so they are shared by every caller on that surface, including the static token. Their life is governed by their own unsubscribe and expiry, as before OAuth existed.
+
+**Becomes a bug if:** a subscription becomes visible to or removable by a caller on the other surface, or outlives its own expiry.
+
+## The loopback guard accepts the public hostname, matching on hostname alone
+
+**Observe:** in TCP mode, a request whose `Host` is `127.0.0.1` or the configured public hostname passes, whatever its scheme or port, and `Origin` is checked the same way.
+
+**Why:** a tunnel forwards the public `Host` to the loopback listener, so refusing it would make the deployment unreachable. The SDK helpers compare hostnames only. Every other hostname is still refused with 403, including on the OAuth endpoints, and the public hostname is accepted only when OAuth is configured.
+
+**Becomes a bug if:** any other hostname passes, the public hostname passes with OAuth off, or an OAuth endpoint skips the guard.
+
+## An empty redirect allowlist restores the default instead of allowing nothing
+
+**Observe:** `TASKFERRY_MCP_OAUTH_ALLOWED_REDIRECTS=` (empty) leaves Claude's callbacks and loopback allowed.
+
+**Why:** an empty environment variable counts as unset for every setting in this bridge. The default list is the narrow one, so the fallback fails safe. To allow only one client, name its callback.
+
+**Becomes a bug if:** an empty value widens the list beyond the default, or a malformed non-empty value is ignored instead of refused.
