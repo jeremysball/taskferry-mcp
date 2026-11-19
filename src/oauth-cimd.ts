@@ -1,8 +1,12 @@
 import { isIP } from 'node:net';
+import https from 'node:https';
+import { pipeline, Readable, Transform, type TransformCallback } from 'node:stream';
+import { createBrotliDecompress, createGunzip, createInflate, createInflateRaw } from 'node:zlib';
 import { isRecord, isStrings } from './json.ts';
 import { MAX_REDIRECT_URI_CHARS, cleanClientName, redirectAllowed } from './oauth-clients.ts';
 import type { RedirectRules } from './oauth-config.ts';
 import type { ClientView } from './oauth-store.ts';
+import { pinnedLookup, resolveCallbackTarget } from './webhook.ts';
 
 // Client ID Metadata Documents (draft-ietf-oauth-client-id-metadata-document-00): the client_id
 // is an https URL whose body is the client's registration. The authorization server fetches it
@@ -31,8 +35,7 @@ const LOCAL_SUFFIXES = ['.localhost', '.local', '.internal', '.home.arpa'];
 
 // SSRF guard for literal addresses and obviously local names. Every IP literal is refused, so an
 // IPv6 form cannot be mistaken for a hostname, and one trailing dot is ignored so `localhost.`
-// cannot slip past the local-name checks. A public name that resolves to a private address is
-// not caught here; see docs/things-that-look-like-bugs.md.
+// cannot slip past the local-name checks. DNS addresses are checked by the pinned transport.
 function privateHost(hostname: string): boolean {
   const host = hostname
     .toLowerCase()
@@ -72,6 +75,114 @@ export function parseClientIdUrl(value: string): URL | undefined {
 }
 
 export const isClientIdUrl = (value: string) => parseClientIdUrl(value) !== undefined;
+
+class DeflateDecoder extends Transform {
+  private decoder?: ReturnType<typeof createInflate>;
+
+  override _transform(chunk: Buffer, _encoding: string, callback: TransformCallback) {
+    if (!this.decoder && chunk.length) {
+      this.decoder = (chunk[0] & 15) === 8 ? createInflate() : createInflateRaw();
+      this.decoder.on('data', (data: Buffer) => this.push(data));
+      this.decoder.on('error', (error) => this.destroy(error));
+    }
+    if (this.decoder) this.decoder.write(chunk, callback);
+    else callback();
+  }
+
+  override _final(callback: TransformCallback) {
+    if (this.decoder) this.decoder.end(callback);
+    else callback();
+  }
+
+  override _destroy(error: Error | null, callback: (error?: Error | null) => void) {
+    this.decoder?.destroy();
+    callback(error);
+  }
+}
+
+function cappedDecoderStages(decoders: Transform[]): Transform[] {
+  return decoders.flatMap((decoder, index) => {
+    if (index === decoders.length - 1) return [decoder];
+    let size = 0;
+    return [
+      decoder,
+      new Transform({
+        transform(chunk: Buffer, _encoding, callback) {
+          size += chunk.length;
+          callback(size > CIMD_MAX_BYTES ? new Error('decoded body too large') : null, chunk);
+        },
+      }),
+    ];
+  });
+}
+
+async function pinnedFetch(
+  input: string | URL | Request,
+  init?: Parameters<CimdFetch>[1],
+): Promise<Response> {
+  const target = await resolveCallbackTarget(String(input), {
+    preserveTrailingDot: true,
+    dnsPurpose: 'cimd',
+  });
+  init?.signal?.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const request = https.request(
+      {
+        hostname: target.url.hostname,
+        port: target.url.port || 443,
+        path: target.url.href.slice(target.url.origin.length),
+        method: 'GET',
+        headers: { accept: 'application/json', 'accept-encoding': 'gzip, deflate, br' },
+        agent: false,
+        lookup: pinnedLookup(target, target.addresses) as NonNullable<
+          https.RequestOptions['lookup']
+        >,
+        ...{ autoSelectFamily: true },
+        signal: init?.signal ?? undefined,
+      },
+      (response) => {
+        try {
+          const headers = new Headers();
+          for (let i = 0; i < response.rawHeaders.length; i += 2) {
+            headers.append(response.rawHeaders[i], response.rawHeaders[i + 1]);
+          }
+          const status = response.statusCode ?? 500;
+          if (status !== 200) {
+            response.destroy();
+            resolve(new Response(null, { status, headers }));
+            return;
+          }
+          const encodings = (headers.get('content-encoding') ?? '')
+            .toLowerCase()
+            .split(',')
+            .map((value) => value.trim())
+            .filter(Boolean);
+          if (encodings.length > 3) throw new Error('too many content encodings');
+          const decoders = encodings.reverse().map((encoding) => {
+            if (encoding === 'gzip') return createGunzip();
+            if (encoding === 'deflate') return new DeflateDecoder();
+            if (encoding === 'br') return createBrotliDecompress();
+            return undefined;
+          });
+          let stream: Readable = response;
+          if (decoders.length && decoders.every((decoder) => decoder !== undefined)) {
+            const stages = cappedDecoderStages(decoders);
+            pipeline([response, ...stages], () => {});
+            stream = stages[stages.length - 1];
+          }
+          const body = Readable.toWeb(stream) as ReadableStream;
+          resolve(new Response(body, { status, headers }));
+        } catch (error) {
+          response.destroy();
+          reject(error);
+        }
+      },
+    );
+    request.on('error', reject);
+    request.on('close', () => reject(new Error('metadata request closed before response')));
+    request.end();
+  });
+}
 
 type DocumentVerdict = { redirectUris: string[] } | { reason: string };
 
@@ -152,7 +263,7 @@ export class CimdResolver {
   constructor(options: CimdOptions) {
     this.options = options;
     this.now = options.now ?? Date.now;
-    this.fetchImpl = options.fetch ?? fetch;
+    this.fetchImpl = options.fetch ?? pinnedFetch;
   }
 
   // A registered client always wins; a URL-shaped id is fetched and validated. Any failure is an

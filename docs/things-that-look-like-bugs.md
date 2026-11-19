@@ -4,6 +4,47 @@ Working-as-designed behavior a reader would reasonably file as broken. A real
 bug goes in the issue tracker. When a later change restores the "obvious"
 behavior, delete the entry.
 
+## Timed-out CIMD DNS lookups can keep metadata capacity unavailable
+
+**Observe:** CIMD host lookups can be refused even after earlier lookup requests
+timed out.
+
+**Why:** the resolver admits at most two underlying CIMD system lookups.
+Webhook lookups remain uncapped, as before. Both classes still share libuv's
+getaddrinfo worker pool, so CIMD admission limits do not guarantee execution-resource
+isolation for webhooks.
+A timeout cannot cancel one, so its slot remains occupied until it settles.
+If lookups remain stuck permanently, capacity remains unavailable; this is the
+tradeoff required to bound outstanding system work.
+
+**Becomes a bug if:** a slot stays occupied after its underlying lookup settles,
+or more than two underlying CIMD lookups are admitted at once.
+
+## A small CIMD document can exceed the compression limits
+
+**Observe:** a metadata document below the 5 KB final body limit is refused if
+it uses more than three content encodings or an intermediate decoding stage
+exceeds 5 KB.
+
+**Why:** each decoding layer consumes resources before the final document is
+checked. The stage count and intermediate limits bound that work for responses
+from untrusted hosts (`src/oauth-cimd.ts`).
+
+**Becomes a bug if:** a response within those limits is rejected by these checks,
+or a decoding stage can exceed its limit without being rejected.
+
+## A CIMD hostname can be refused before DNS
+
+**Observe:** a metadata URL with a single-label hostname or a `.test` or
+`.invalid` suffix is refused even if a local resolver could return a public
+address for it.
+
+**Why:** the pinned transport shares the webhook's conservative hostname check
+before resolving and validating every DNS answer (`src/webhook.ts`).
+
+**Becomes a bug if:** an ordinary fully qualified public hostname is rejected by
+this name check, or a refused hostname reaches the connection step.
+
 ## The bridge and gateway only accept loopback connections
 
 **Observe:** with `--listen-port`, `curl http://<this-host's-LAN-or-tailnet-IP>:<port>/mcp`
@@ -526,7 +567,7 @@ the source task has ended but before its record updates.
 
 **Observe:** registering a client whose `client_id` is an `https` URL on a literal private address such as `https://10.0.0.5/client.json`, or on a `localhost`/`.local`/`.internal`/`.home.arpa` name, is refused; a URL over plain `http` is refused too.
 
-**Why:** the bridge fetches the document from its own network position, so an unrestricted URL is a server-side request forgery primitive that can read internal services. The check covers literal addresses and obviously local names only; a public DNS name that resolves to a private address is not detected, because resolving before fetch would not bind the later connection to that answer.
+**Why:** the bridge fetches the document from its own network position, so an unrestricted URL is a server-side request forgery primitive. The bridge rejects literal addresses and local names, checks all DNS answers, and pins the connection to a public answer.
 
 **Becomes a bug if:** a refused URL is fetched anyway, or the guard is applied to the client's own redirect destinations instead of the metadata URL.
 
@@ -566,6 +607,6 @@ the source task has ended but before its record updates.
 
 **Observe:** `https://8.8.8.8/client.json` is refused even though the address is public, while the same document on a hostname is fetched.
 
-**Why:** the guard refuses all IP literals rather than trying to classify private ranges. That removes the IPv6 bracket-normalization trap that let bracketed literals through, and a metadata document is expected to live at a stable named URL. A public name that resolves to a private address is still not detected; that residual risk is recorded above.
+**Why:** the guard refuses all IP literals rather than trying to classify private ranges. That removes the IPv6 bracket-normalization trap that let bracketed literals through, and a metadata document is expected to live at a stable named URL. DNS answers are checked separately before connecting.
 
 **Becomes a bug if:** a URL-shaped client id with a hostname is refused for being an address, or a bracketed IPv6 literal reaches the fetcher.

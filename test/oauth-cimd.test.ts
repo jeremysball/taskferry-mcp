@@ -1,6 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createServer } from 'node:http';
+import {
+  createServer,
+  request as httpRequest,
+  type IncomingMessage,
+  type RequestListener,
+} from 'node:http';
+import https from 'node:https';
+import dns from 'node:dns/promises';
+import { generateKeyPairSync } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+import { brotliCompressSync, deflateRawSync, gzipSync } from 'node:zlib';
 import path from 'node:path';
 import {
   CIMD_MAX_BYTES,
@@ -34,12 +45,459 @@ const RESOURCE = 'https://mcp.example.com/mcp';
 const JSON_TYPE = 'application/json';
 const CLIENT_NAME = 'Metadata client';
 const REDIRECTS = { exact: [CLAUDE_CALLBACK], loopback: true };
+// These simulated DNS answers are never contacted; test connections use loopback instead.
+// eslint-disable-next-line sonarjs/no-hardcoded-ip
+const PUBLIC_FIRST = '8.8.8.8';
+// eslint-disable-next-line sonarjs/no-hardcoded-ip
+const PUBLIC_SECOND = '1.1.1.1';
+
+test('metadata host resolving to loopback never opens a connection', async () => {
+  let requests = 0;
+  const server = createServer((_request, response) => {
+    requests++;
+    response.writeHead(200, { 'content-type': JSON_TYPE });
+    response.end(JSON.stringify(doc()));
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== 'string');
+  const originalLookup = dns.lookup;
+  const originalRequest = https.request;
+  let records = [{ address: PUBLIC_FIRST, family: 4 }];
+  dns.lookup = (async () => records) as unknown as typeof dns.lookup;
+  syncBuiltinESMExports();
+  https.request = ((options: https.RequestOptions, callback: (response: IncomingMessage) => void) =>
+    httpRequest(
+      { hostname: '127.0.0.1', port: address.port, path: options.path },
+      callback,
+    )) as typeof https.request;
+  try {
+    const resolve = () =>
+      new CimdResolver({ redirects: REDIRECTS, log: () => {} }).resolve(CLIENT_ID);
+    assert.equal((await resolve())?.clientName, CLIENT_NAME);
+    assert.equal(requests, 1);
+    for (const privateRecord of [
+      { address: '127.0.0.1', family: 4 },
+      { address: '::1', family: 6 },
+    ]) {
+      for (const ordered of [
+        [{ address: PUBLIC_FIRST, family: 4 }, privateRecord],
+        [privateRecord, { address: PUBLIC_FIRST, family: 4 }],
+      ]) {
+        records = ordered;
+        const result = await resolve();
+        assert.equal(requests, 1);
+        assert.equal(result, undefined);
+      }
+    }
+  } finally {
+    https.request = originalRequest;
+    dns.lookup = originalLookup;
+    syncBuiltinESMExports();
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+  }
+});
 
 const doc = (overrides: Record<string, unknown> = {}) => ({
   client_id: CLIENT_ID,
   client_name: CLIENT_NAME,
   redirect_uris: [CLAUDE_CALLBACK],
   ...overrides,
+});
+
+test('metadata connects to a second validated address when the first refuses connection', async () => {
+  const server = createServer((_req, res) => {
+    res.writeHead(200, { 'content-type': JSON_TYPE });
+    res.end(JSON.stringify(doc()));
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== 'string');
+  const originalLookup = dns.lookup;
+  const originalRequest = https.request;
+  let dnsCalls = 0;
+  const supplied: string[] = [];
+  let socket: import('node:net').Socket | undefined;
+  dns.lookup = (async () => {
+    dnsCalls++;
+    return [
+      { address: PUBLIC_FIRST, family: 4 },
+      { address: PUBLIC_SECOND, family: 4 },
+    ];
+  }) as unknown as typeof dns.lookup;
+  syncBuiltinESMExports();
+  https.request = ((
+    options: https.RequestOptions,
+    callback: (response: IncomingMessage) => void,
+  ) => {
+    const request = httpRequest(
+      {
+        hostname: options.hostname,
+        port: address.port,
+        path: options.path,
+        signal: options.signal,
+        agent: false,
+        ...{ autoSelectFamily: true },
+        lookup: ((hostname: string, lookupOptions: unknown, done: (...args: unknown[]) => void) => {
+          const lookup = options.lookup as (
+            host: string,
+            opts: unknown,
+            cb: (...args: unknown[]) => void,
+          ) => void;
+          lookup(hostname, lookupOptions, (error: unknown, result: unknown, family: unknown) => {
+            if (error) {
+              done(error);
+              return;
+            }
+            const records = Array.isArray(result) ? result : [{ address: result, family }];
+            supplied.push(...records.map((record) => record.address));
+            const mapped = records.map((record) => ({
+              address: record.address === PUBLIC_FIRST ? '127.0.0.2' : '127.0.0.1',
+              family: 4,
+            }));
+            if (Array.isArray(result)) done(null, mapped);
+            else done(null, mapped[0].address, 4);
+          });
+        }) as NonNullable<https.RequestOptions['lookup']>,
+      },
+      callback,
+    );
+    request.on('socket', (connectedSocket) => {
+      socket = connectedSocket;
+    });
+    return request;
+  }) as typeof https.request;
+  try {
+    const client = new CimdResolver({ redirects: REDIRECTS, log: () => {} });
+    assert.equal((await client.resolve(CLIENT_ID))?.clientName, CLIENT_NAME);
+    assert.deepEqual(supplied, [PUBLIC_FIRST, PUBLIC_SECOND]);
+    assert.deepEqual(socket?.autoSelectFamilyAttemptedAddresses, [
+      `127.0.0.2:${address.port}`,
+      `127.0.0.1:${address.port}`,
+    ]);
+    assert.equal(dnsCalls, 1);
+  } finally {
+    https.request = originalRequest;
+    dns.lookup = originalLookup;
+    syncBuiltinESMExports();
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+  }
+});
+
+test('pinned HTTPS uses the resolved address and verifies the original hostname', async () => {
+  const { privateKey } = generateKeyPairSync('rsa', {
+    modulusLength: 2048,
+    privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+    publicKeyEncoding: { type: 'spki', format: 'pem' },
+  });
+  const cert = execFileSync(
+    // eslint-disable-next-line sonarjs/no-os-command-from-path
+    'bash',
+    [
+      '-c',
+      'openssl req -new -x509 -key <(openssl pkey) -days 1 -subj /CN=client.example.com -addext subjectAltName=DNS:client.example.com',
+    ],
+    { input: privateKey, encoding: 'utf8' },
+  );
+  const names: string[] = [];
+  const server = https.createServer({ key: privateKey, cert }, (req, res) => {
+    names.push(req.headers.host ?? '');
+    res.writeHead(200, { 'content-type': JSON_TYPE });
+    res.end(JSON.stringify(doc({ client_id: `https://${req.headers.host}/metadata.json` })));
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== 'string');
+  const originalLookup = dns.lookup;
+  const originalRequest = https.request;
+  const resolved: unknown[] = [];
+  const errors: string[] = [];
+  const lookups: string[] = [];
+  const publicAddress = PUBLIC_FIRST;
+  dns.lookup = (async (hostname: string) => {
+    lookups.push(hostname);
+    return [
+      { address: publicAddress, family: 4 },
+      { address: PUBLIC_SECOND, family: 4 },
+    ];
+  }) as unknown as typeof dns.lookup;
+  syncBuiltinESMExports();
+  https.request = ((
+    options: https.RequestOptions,
+    callback: (response: IncomingMessage) => void,
+  ) => {
+    const lookup = options.lookup;
+    const request = originalRequest(
+      {
+        ...options,
+        ca: cert,
+        lookup: ((hostname: string, lookupOptions: unknown, done: (...args: unknown[]) => void) => {
+          if (!lookup) {
+            done(new Error('missing pinned lookup'));
+            return;
+          }
+          (lookup as (host: string, opts: unknown, cb: (...args: unknown[]) => void) => void)(
+            hostname,
+            lookupOptions,
+            (error: unknown, result: unknown, family: unknown) => {
+              resolved.push({ hostname, error, result, family });
+              if (error) done(error);
+              else if (Array.isArray(result))
+                done(
+                  null,
+                  result.map(() => ({ address: '127.0.0.1', family: 4 })),
+                );
+              else done(null, '127.0.0.1', 4);
+            },
+          );
+        }) as NonNullable<https.RequestOptions['lookup']>,
+      },
+      callback,
+    );
+    request.on('error', (error: Error & { code?: string }) =>
+      errors.push(error.code ?? error.name),
+    );
+    return request;
+  }) as typeof https.request;
+  try {
+    const client = new CimdResolver({ redirects: REDIRECTS, log: () => {} });
+    const host = 'client.example.com';
+    const dottedHost = `${host}.`;
+    const good = `https://client.example.com:${address.port}/metadata.json`;
+    const dotted = `https://client.example.com.:${address.port}/metadata.json`;
+    const bad = `https://wrong.example.com:${address.port}/metadata.json`;
+    assert.equal((await client.resolve(good))?.clientName, CLIENT_NAME);
+    const dottedClient = await client.resolve(dotted);
+    assert.deepEqual(lookups, [host, dottedHost]);
+    assert.deepEqual(names, [
+      `client.example.com:${address.port}`,
+      `client.example.com.:${address.port}`,
+    ]);
+    assert.equal(dottedClient?.clientId, dotted);
+    assert.equal(await client.resolve(bad), undefined);
+    assert.deepEqual(lookups, [host, dottedHost, 'wrong.example.com']);
+    assert.deepEqual(errors, ['ERR_TLS_CERT_ALTNAME_INVALID']);
+    assert.equal(resolved.length, 3);
+    for (const [index, hostname] of [host, dottedHost, 'wrong.example.com'].entries()) {
+      const observation = resolved[index] as {
+        hostname: string;
+        error: unknown;
+        result: unknown;
+        family: unknown;
+      };
+      assert.equal(observation.hostname, hostname);
+      assert.equal(observation.error, null);
+      assert.ok(
+        observation.result === publicAddress ||
+          JSON.stringify(observation.result) ===
+            JSON.stringify([
+              { address: publicAddress, family: 4 },
+              { address: PUBLIC_SECOND, family: 4 },
+            ]),
+      );
+    }
+  } finally {
+    https.request = originalRequest;
+    dns.lookup = originalLookup;
+    syncBuiltinESMExports();
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+  }
+});
+
+async function withMetadataServer(respond: RequestListener, run: () => Promise<void>) {
+  const server = createServer(respond);
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== 'string');
+  const originalLookup = dns.lookup;
+  const originalRequest = https.request;
+  dns.lookup = (async () => [
+    { address: PUBLIC_FIRST, family: 4 },
+    { address: PUBLIC_SECOND, family: 4 },
+  ]) as unknown as typeof dns.lookup;
+  syncBuiltinESMExports();
+  https.request = ((options: https.RequestOptions, callback: (response: IncomingMessage) => void) =>
+    httpRequest(
+      {
+        hostname: '127.0.0.1',
+        port: address.port,
+        path: options.path,
+        method: options.method,
+        headers: options.headers,
+        signal: options.signal,
+        agent: false,
+      },
+      callback,
+    )) as typeof https.request;
+  try {
+    await run();
+  } finally {
+    https.request = originalRequest;
+    dns.lookup = originalLookup;
+    syncBuiltinESMExports();
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+  }
+}
+
+test('an HTTP error response does not retry another address', async () => {
+  let requests = 0;
+  await withMetadataServer(
+    (_req, res) => {
+      requests++;
+      res.writeHead(503);
+      res.end();
+    },
+    async () => {
+      const client = new CimdResolver({ redirects: REDIRECTS, log: () => {} });
+      assert.equal(await client.resolve(CLIENT_ID), undefined);
+      assert.equal(requests, 1);
+    },
+  );
+});
+
+test('invalid metadata response status is rejected without an uncaught exception', async () => {
+  await withMetadataServer(
+    (_req, res) => {
+      res.writeHead(999);
+      res.end();
+    },
+    async () => {
+      const client = new CimdResolver({ redirects: REDIRECTS, log: () => {} });
+      assert.equal(await client.resolve(CLIENT_ID), undefined);
+    },
+  );
+});
+
+test('preserves an empty query in the metadata request target', async () => {
+  const clientId = `${CLIENT_ID}?`;
+  await withMetadataServer(
+    (req, res) => {
+      res.writeHead(200, { 'content-type': JSON_TYPE });
+      res.end(JSON.stringify(doc({ client_id: `https://client.example.com${req.url}` })));
+    },
+    async () => {
+      const client = new CimdResolver({ redirects: REDIRECTS, log: () => {} });
+      assert.equal((await client.resolve(clientId))?.clientName, CLIENT_NAME);
+    },
+  );
+});
+
+test('unexpected protocol upgrade settles metadata resolution', async () => {
+  await withMetadataServer(
+    (_req, res) => {
+      res.writeHead(101, { connection: 'Upgrade', upgrade: 'test' });
+      res.flushHeaders();
+    },
+    async () => {
+      const client = new CimdResolver({ redirects: REDIRECTS, log: () => {} });
+      const result = await Promise.race([
+        client.resolve(CLIENT_ID).then(() => 'settled'),
+        new Promise<string>((resolve) => setTimeout(() => resolve('stuck'), 200)),
+      ]);
+      assert.equal(result, 'settled');
+    },
+  );
+});
+
+test('refused 205 response closes an unfinished connection promptly', async () => {
+  let closeResponse: (() => void) | undefined;
+  let closed = false;
+  await withMetadataServer(
+    (_req, res) => {
+      closeResponse = () => res.destroy();
+      res.on('close', () => {
+        closed = true;
+      });
+      res.writeHead(205, { 'transfer-encoding': 'chunked' });
+      res.flushHeaders();
+    },
+    async () => {
+      try {
+        const client = new CimdResolver({ redirects: REDIRECTS, log: () => {} });
+        assert.equal(await client.resolve(CLIENT_ID), undefined);
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        assert.equal(closed, true);
+      } finally {
+        closeResponse?.();
+      }
+    },
+  );
+});
+
+test('rejects excessively nested content encodings', async () => {
+  let body = Buffer.from(JSON.stringify(doc()));
+  for (let i = 0; i < 4; i++) body = gzipSync(body);
+  await withMetadataServer(
+    (_req, res) => {
+      res.writeHead(200, {
+        'content-type': JSON_TYPE,
+        'content-encoding': 'gzip, gzip, gzip, gzip',
+      });
+      res.end(body);
+    },
+    async () => {
+      const client = new CimdResolver({ redirects: REDIRECTS, log: () => {} });
+      assert.equal(await client.resolve(CLIENT_ID), undefined);
+    },
+  );
+});
+
+test('gzip encoded metadata is decoded before validation', async () => {
+  await withMetadataServer(
+    (_req, res) => {
+      res.writeHead(200, { 'content-type': JSON_TYPE, 'content-encoding': 'gzip' });
+      res.end(gzipSync(JSON.stringify(doc())));
+    },
+    async () => {
+      const client = new CimdResolver({ redirects: REDIRECTS, log: () => {} });
+      assert.equal((await client.resolve(CLIENT_ID))?.clientName, CLIENT_NAME);
+    },
+  );
+});
+
+for (const [name, encoding, compress] of [
+  ['stacked', 'gzip, br', (data: Buffer) => brotliCompressSync(gzipSync(data))],
+  ['raw deflate', 'deflate', (data: Buffer) => deflateRawSync(data)],
+] as const) {
+  test(`${name} encoded metadata is decoded before validation`, async () => {
+    await withMetadataServer(
+      (_req, res) => {
+        res.writeHead(200, { 'content-type': JSON_TYPE, 'content-encoding': encoding });
+        res.end(compress(Buffer.from(JSON.stringify(doc()))));
+      },
+      async () => {
+        const client = new CimdResolver({ redirects: REDIRECTS, log: () => {} });
+        assert.equal((await client.resolve(CLIENT_ID))?.clientName, CLIENT_NAME);
+      },
+    );
+  });
+}
+
+test('rejects oversized intermediate decompression output', async () => {
+  const emptyMember = gzipSync(Buffer.alloc(0));
+  const intermediate = Buffer.concat([
+    ...Array.from({ length: 300 }, () => emptyMember),
+    gzipSync(JSON.stringify(doc())),
+  ]);
+  assert.ok(intermediate.length > CIMD_MAX_BYTES);
+  await withMetadataServer(
+    (_req, res) => {
+      res.writeHead(200, { 'content-type': JSON_TYPE, 'content-encoding': 'gzip, gzip' });
+      res.end(gzipSync(intermediate));
+    },
+    async () => {
+      const client = new CimdResolver({ redirects: REDIRECTS, log: () => {} });
+      assert.equal(await client.resolve(CLIENT_ID), undefined);
+    },
+  );
 });
 
 // A fetch that answers from a table and counts calls, so caching is visible.

@@ -16,7 +16,7 @@ The fetch is the interesting part. The bridge would retrieve a URL chosen by an 
 
 The bridge accepts both mechanisms. When `client_id` is not a registered client, and it parses as an `https` URL per the draft (a path, no dot segments, no credentials, no fragment), the bridge fetches it as a metadata document and treats a valid document as a client registration for that request.
 
-The fetch is constrained: `redirect: 'manual'` so a redirect is never followed, status 200 only, `application/json` or a `+json` suffix, a 5 KB body cap enforced while streaming, and a 5 s timeout. URL hosts that are IP literals, `localhost`, `.localhost`, `.local`, `.internal` or `.home.arpa` names are refused before any request is made.
+The fetch is constrained: the HTTPS transport does not follow redirects, accepts status 200 only and `application/json` or a `+json` suffix, enforces a 5 KB body cap while streaming, and times out after 5 s. IP literals, single-label names, `localhost`, and names ending in `.localhost`, `.local`, `.internal`, `.home.arpa`, `.test` or `.invalid` are refused before any request is made.
 
 The document must name its own `client_id`, carry a `client_name`, and list 1 to 10 `redirect_uris`. A document carrying a client secret, a token-endpoint auth method other than `none`, or grant/response types other than `authorization_code` and `code` is refused, because this server cannot honour them. Redirect URIs are filtered through the same operator allowlist that registration uses, so the allowlist still decides every destination.
 
@@ -25,7 +25,7 @@ Documents are cached per URL for the `Cache-Control` `max-age`, clamped to 60 se
 ## Consequences
 
 - Clients that use CIMD sign in without a registration step, and the discovery document advertises `client_id_metadata_document_supported: true`.
-- The SSRF surface is bounded to public `https` hosts and small JSON responses, but a public DNS name that resolves to a private address is still fetched. Detecting that would require resolving first and pinning the connection to the answer, which this implementation does not do; the residual risk is recorded in `docs/things-that-look-like-bugs.md`.
+- The SSRF surface is bounded to public `https` hosts and small JSON responses. DNS answers are checked for non-public addresses and the connection is pinned to a validated address.
 - A stale cached document can disagree with the live one for up to an hour. The allowlist still limits redirects, so staleness can only narrow what the client may use, never widen it beyond the operator's list.
 - Two mechanisms now produce clients. Registration writes to the store; CIMD clients exist only as fetched metadata plus the pending sign-in's captured name and ID, so a restart forgets them until the next request refetches.
 - The document is untrusted input from the network and is parsed with the same JSON guards as stored state; nothing in it is logged or echoed beyond the client name and host shown on the consent page.
@@ -35,4 +35,4 @@ Documents are cached per URL for the `Cache-Control` `max-age`, clamped to 60 se
 - **Dynamic registration only.** Simplest, and it was the previous state, but it forces CIMD-preferring clients onto a path their implementations may not use.
 - **Fetch the document at registration and store it.** A CIMD client does not call registration, so there is no registration moment to hook; storing it would also make an unauthenticated fetch mutate durable state.
 - **Operator-maintained `client_id` allowlist.** No network fetch at all, but every new client URL becomes a config edit, which defeats the point of the mechanism.
-- **Resolve DNS and reject private answers before fetching.** Closer to complete, but without binding the fetch to the resolved address it only moves the race, and it adds a resolver dependency to the bridge.
+- **Resolve DNS and reject private answers without pinning the connection.** A second lookup at connection time would leave a DNS rebinding race.
