@@ -30,6 +30,21 @@ export const MAX_EVENT_BYTES = 256 * 1024;
 export const MAX_CALLBACK_RESPONSE_BYTES = 64 * 1024;
 const DEFAULT_TIMEOUT_MS = 10_000;
 const DNS_TIMEOUT_MS = 5_000;
+const MAX_OUTSTANDING_CIMD_DNS_LOOKUPS = 2;
+let outstandingCimdDnsLookups = 0;
+
+async function resolveDns(host: string, purpose: 'webhook' | 'cimd') {
+  if (purpose === 'webhook') return lookup(host, { all: true, verbatim: true });
+  if (outstandingCimdDnsLookups >= MAX_OUTSTANDING_CIMD_DNS_LOOKUPS) {
+    throw new CallbackError('connection_refused', 'callback host lookup capacity exhausted');
+  }
+  outstandingCimdDnsLookups++;
+  try {
+    return await lookup(host, { all: true, verbatim: true });
+  } finally {
+    outstandingCimdDnsLookups--;
+  }
+}
 
 function ipv4Number(address: string): number | null {
   const parts = address.split('.');
@@ -143,8 +158,7 @@ function isPublicIPv6(address: string): boolean {
   if (!words) return false;
   if (words.every((word) => word === 0)) return false;
   if (words.slice(0, 7).every((word) => word === 0) && words[7] === 1) return false;
-  if (matchesPrefix(words, MAPPED_PREFIX)) return isPublicIPv4(embeddedIPv4(words[6], words[7]));
-  if (matchesPrefix(words, TRANSLATED_PREFIX)) {
+  if ([MAPPED_PREFIX, TRANSLATED_PREFIX].some((prefix) => matchesPrefix(words, prefix))) {
     return isPublicIPv4(embeddedIPv4(words[6], words[7]));
   }
   if (words.slice(0, 6).every((word) => word === 0)) {
@@ -152,6 +166,7 @@ function isPublicIPv6(address: string): boolean {
   }
   if (words[0] === 0x2002) return isPublicIPv4(embeddedIPv4(words[1], words[2]));
   if (matchesPrefix(words, NAT64_PREFIX)) return isPublicIPv4(embeddedIPv4(words[6], words[7]));
+  if ((words[0] & 0xe000) !== 0x2000) return false;
   return !BLOCKED_IPV6.some((prefix) => matchesPrefix(words, prefix));
 }
 
@@ -188,6 +203,7 @@ function validateHostname(hostname: string) {
 }
 
 export type CallbackTarget = { url: URL; host: string; address: string; family: 4 | 6 };
+type ResolvedCallbackTarget = CallbackTarget & { addresses: { address: string; family: 4 | 6 }[] };
 
 export function validateCallbackUrl(raw: string): URL {
   let url: URL;
@@ -208,15 +224,22 @@ export function validateCallbackUrl(raw: string): URL {
 
 // Resolve every address for the host and require all of them to be public. A hostname that
 // resolves to a private address is rejected even if another answer would have been fine. DNS is
-// bounded because an unresponsive resolver would otherwise stall verification indefinitely.
-export async function resolveCallbackTarget(raw: string): Promise<CallbackTarget> {
+// bounded by a timeout because an unresponsive resolver would otherwise stall verification.
+// A timed-out CIMD lookup keeps its admission slot until the underlying lookup actually settles.
+export async function resolveCallbackTarget(
+  raw: string,
+  options?: { preserveTrailingDot?: boolean; dnsPurpose?: 'webhook' | 'cimd' },
+): Promise<ResolvedCallbackTarget> {
   const url = validateCallbackUrl(raw);
   const host = validateHostname(url.hostname);
   let records: { address: string; family: number }[];
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     records = await Promise.race([
-      lookup(host, { all: true, verbatim: true }),
+      resolveDns(
+        options?.preserveTrailingDot ? url.hostname : host,
+        options?.dnsPurpose ?? 'webhook',
+      ),
       new Promise<never>((_resolve, reject) => {
         timer = setTimeout(
           () => reject(new CallbackError('timeout', 'callback host lookup timed out')),
@@ -242,7 +265,11 @@ export async function resolveCallbackTarget(raw: string): Promise<CallbackTarget
     }
   }
   const chosen = records.find((record) => record.family === 4) ?? records[0];
-  return { url, host, address: chosen.address, family: chosen.family === 6 ? 6 : 4 };
+  const addresses = records.map((record) => ({
+    address: record.address,
+    family: (record.family === 6 ? 6 : 4) as 4 | 6,
+  }));
+  return { url, host, addresses, address: chosen.address, family: chosen.family === 6 ? 6 : 4 };
 }
 
 function reasonForError(error: unknown): CallbackFailureReason {
@@ -286,10 +313,13 @@ export type PinnedLookup = (
 
 // Node 20+ may call lookup with `{ all: true }` because of autoSelectFamily. Returning a scalar
 // address in that mode throws ERR_INVALID_IP_ADDRESS before the socket is opened.
-export function pinnedLookup(target: CallbackTarget): PinnedLookup {
+export function pinnedLookup(
+  target: CallbackTarget,
+  addresses?: ResolvedCallbackTarget['addresses'],
+): PinnedLookup {
   return (_hostname, options, callback) => {
     if (typeof options === 'object' && options !== null && (options as { all?: boolean }).all) {
-      callback(null, [{ address: target.address, family: target.family }]);
+      callback(null, addresses ?? [{ address: target.address, family: target.family }]);
     } else {
       callback(null, target.address, target.family);
     }

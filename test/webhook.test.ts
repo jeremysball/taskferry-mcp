@@ -72,6 +72,8 @@ test('public IPv6 ranges are allowed and local, documentation and IPv4-embedded 
     '::ffff:0:127.0.0.1',
     '64:ff9b::7f00:1',
     '3fff::1',
+    '4000::1',
+    '5f00::1',
   ]) {
     assert.equal(isPublicAddress(address), false, address);
   }

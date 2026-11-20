@@ -219,7 +219,7 @@ export function send(url: string, body: string | Buffer[], options: SendOptions 
         method,
         socketPath,
         headers: all,
-        path: target.pathname,
+        path: target.pathname + target.search,
         host: target.hostname,
         port: target.port || undefined,
       },

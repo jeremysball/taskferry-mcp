@@ -36,7 +36,7 @@ method directly.
 
 ## Run tests
 
-`mise run check` runs the full gate: format check, lint, the TypeScript split check, `tsc --noEmit`, and 197 unit tests. CI runs the same steps. `npm test` runs only the tests.
+`mise run check` runs the full gate: format check, lint, the TypeScript split check, `tsc --noEmit`, and 250 tests. CI runs the same steps. `npm test` runs only the tests.
 
 The tests start a real stub daemon on a Unix socket and real HTTP listeners on loopback. Two mutation probes are kept in the evidence directory: disabling the scope guard fails the cross-workspace test, and loosening the socket mode fails the permissions test.
 
@@ -55,26 +55,30 @@ npm start
 
 Each setting resolves as flag, then environment variable, then config-file key, then default.
 
-| Flag                    | Environment                         | Config key           | Default                                     |
-| ----------------------- | ----------------------------------- | -------------------- | ------------------------------------------- |
-| `--daemon-socket`       | `TASKFERRY_SOCKET_PATH`             | `daemonSocket`       | `$TASKFERRY_RUNTIME_DIR/daemon.sock`        |
-| `--allowed-directories` | `TASKFERRY_ALLOWED_DIRECTORIES`     | `allowedDirectories` | none                                        |
-| `--allowed-models`      | `TASKFERRY_ALLOWED_MODELS`          | `allowedModels`      | none                                        |
-| `--allowed-ro-binds`    | `TASKFERRY_ALLOWED_RO_BINDS`        | `allowedRoBinds`     | none                                        |
-| `--skill-profile`       | `TASKFERRY_MCP_SKILL_PROFILE`       | `skillProfile`       | `worker`                                    |
-| `--skill-root`          | `TASKFERRY_MCP_SKILL_ROOT`          | `skillRoot`          | `~/.claude`                                 |
-| `--server-ro-binds`     | `TASKFERRY_MCP_SERVER_RO_BINDS`     | `serverRoBinds`      | none                                        |
-| `--events-state`        | `TASKFERRY_MCP_EVENTS_STATE`        | `eventsStatePath`    | `$XDG_STATE_HOME/taskferry-mcp/events.json` |
-| `--listen-socket`       | `TASKFERRY_MCP_LISTEN_SOCKET`       | `listenSocket`       | `$XDG_RUNTIME_DIR/taskferry-mcp/mcp.sock`   |
-| `--listen-port`         | `TASKFERRY_MCP_LISTEN_PORT`         | `listenPort`         | none                                        |
-| `--token-file`          | `TASKFERRY_MCP_TOKEN_FILE`          | `tokenFile`          | none                                        |
-| `--gateway-port`        | `TASKFERRY_GATEWAY_PORT`            | `gatewayPort`        | `8788`                                      |
-| `--gateway-token-file`  | `TASKFERRY_GATEWAY_TOKEN_FILE`      | `gatewayTokenFile`   | none                                        |
-| `--daemon-timeout-ms`   | `TASKFERRY_MCP_DAEMON_TIMEOUT_MS`   | `daemonTimeoutMs`    | `5000`                                      |
-| `--summary-timeout-ms`  | `TASKFERRY_MCP_SUMMARY_TIMEOUT_MS`  | `summaryTimeoutMs`   | `60000`                                     |
-| `--list-timeout-ms`     | `TASKFERRY_MCP_LIST_TIMEOUT_MS`     | `listTimeoutMs`      | `15000`                                     |
-| `--models-cache-ttl-ms` | `TASKFERRY_MCP_MODELS_CACHE_TTL_MS` | `modelsCacheTtlMs`   | `60000`                                     |
-| `--preview-chars`       | `TASKFERRY_MCP_PREVIEW_CHARS`       | `previewChars`       | `500`                                       |
+| Flag                        | Environment                             | Config key              | Default                                     |
+| --------------------------- | --------------------------------------- | ----------------------- | ------------------------------------------- |
+| `--daemon-socket`           | `TASKFERRY_SOCKET_PATH`                 | `daemonSocket`          | `$TASKFERRY_RUNTIME_DIR/daemon.sock`        |
+| `--allowed-directories`     | `TASKFERRY_ALLOWED_DIRECTORIES`         | `allowedDirectories`    | none                                        |
+| `--allowed-models`          | `TASKFERRY_ALLOWED_MODELS`              | `allowedModels`         | none                                        |
+| `--allowed-ro-binds`        | `TASKFERRY_ALLOWED_RO_BINDS`            | `allowedRoBinds`        | none                                        |
+| `--skill-profile`           | `TASKFERRY_MCP_SKILL_PROFILE`           | `skillProfile`          | `worker`                                    |
+| `--skill-root`              | `TASKFERRY_MCP_SKILL_ROOT`              | `skillRoot`             | `~/.claude`                                 |
+| `--server-ro-binds`         | `TASKFERRY_MCP_SERVER_RO_BINDS`         | `serverRoBinds`         | none                                        |
+| `--events-state`            | `TASKFERRY_MCP_EVENTS_STATE`            | `eventsStatePath`       | `$XDG_STATE_HOME/taskferry-mcp/events.json` |
+| `--listen-socket`           | `TASKFERRY_MCP_LISTEN_SOCKET`           | `listenSocket`          | `$XDG_RUNTIME_DIR/taskferry-mcp/mcp.sock`   |
+| `--listen-port`             | `TASKFERRY_MCP_LISTEN_PORT`             | `listenPort`            | none                                        |
+| `--token-file`              | `TASKFERRY_MCP_TOKEN_FILE`              | `tokenFile`             | none                                        |
+| `--gateway-port`            | `TASKFERRY_GATEWAY_PORT`                | `gatewayPort`           | `8788`                                      |
+| `--gateway-token-file`      | `TASKFERRY_GATEWAY_TOKEN_FILE`          | `gatewayTokenFile`      | none                                        |
+| `--public-url`              | `TASKFERRY_MCP_PUBLIC_URL`              | `publicUrl`             | none (OAuth off)                            |
+| `--oauth-secret-file`       | `TASKFERRY_MCP_OAUTH_SECRET_FILE`       | `oauthSecretFile`       | none                                        |
+| `--oauth-allowed-redirects` | `TASKFERRY_MCP_OAUTH_ALLOWED_REDIRECTS` | `oauthAllowedRedirects` | Claude callbacks plus loopback              |
+| `--oauth-state`             | `TASKFERRY_MCP_OAUTH_STATE`             | `oauthStatePath`        | `$XDG_STATE_HOME/taskferry-mcp/oauth.json`  |
+| `--daemon-timeout-ms`       | `TASKFERRY_MCP_DAEMON_TIMEOUT_MS`       | `daemonTimeoutMs`       | `5000`                                      |
+| `--summary-timeout-ms`      | `TASKFERRY_MCP_SUMMARY_TIMEOUT_MS`      | `summaryTimeoutMs`      | `60000`                                     |
+| `--list-timeout-ms`         | `TASKFERRY_MCP_LIST_TIMEOUT_MS`         | `listTimeoutMs`         | `15000`                                     |
+| `--models-cache-ttl-ms`     | `TASKFERRY_MCP_MODELS_CACHE_TTL_MS`     | `modelsCacheTtlMs`      | `60000`                                     |
+| `--preview-chars`           | `TASKFERRY_MCP_PREVIEW_CHARS`           | `previewChars`          | `500`                                       |
 
 `--config` and `TASKFERRY_MCP_CONFIG` name a config file; the default is `$XDG_CONFIG_HOME/taskferry-mcp/config.json`. Directory lists split on `:`, model lists on `,`, and caller and server bind lists on `:`.
 
@@ -90,7 +94,7 @@ For a client that only speaks HTTP, use a loopback TCP port:
 node src/server.ts --listen-port 8787
 ```
 
-TCP mode binds `127.0.0.1` and refuses any request whose `Host` or `Origin` is not loopback, even with a valid token. Do not expose this listener directly. TLS and external reachability belong to an authenticated proxy.
+TCP mode binds `127.0.0.1` and refuses any request whose `Host` or `Origin` is not loopback, even with a valid token. Do not expose this listener directly. TLS and external reachability belong to a proxy or tunnel in front of it. With a static token only, that proxy should add its own authentication; with OAuth on (next section), the proxy must not, because the OAuth endpoints have to be reachable by clients that hold no credential yet.
 
 ## Gateway surface
 
@@ -103,6 +107,42 @@ npm start
 ```
 
 It listens on loopback TCP 8788 by default (`--gateway-port`, `TASKFERRY_GATEWAY_PORT`, or `gatewayPort` changes it) and serves the same tools with the gateway token instead of the MCP token. That includes `taskferry_files`: a gateway token can read every host path the service user can read, including the bridge token file or process environment if either is readable, so the tokens are distinct HTTP credentials but not separate filesystem principals. The bridge token is refused there, and the gateway token is refused on the bridge listener. The two tokens must differ, and the gateway port must differ from the bridge's TCP port. Like the bridge's TCP mode, it binds `127.0.0.1` only and refuses non-loopback `Host` or `Origin`; reaching it from elsewhere is the job of an authenticated proxy. Setting a gateway port without a token is a configuration error rather than an unauthenticated listener. The old standalone gateway's `TASKFERRY_UPSTREAM_URL` and `PORT` variables are not read; a leftover `TASKFERRY_UPSTREAM_URL` is a configuration error, and the port comes only from the knobs above. The surface is not separately deployable: a Sites-native handler and a real deployment still need the Sites runtime and API.
+
+## OAuth for remote clients
+
+A remote MCP client such as a claude.ai custom connector signs in with OAuth instead of a pasted token. When a public URL is configured, the bridge also acts as a small single-owner OAuth 2.1 authorization server: the MCP endpoint stays the resource server, and one person (you) approves each client by typing a secret into a consent page. There is no external identity provider and no user database. The static bearer token keeps working beside it.
+
+```
+export TASKFERRY_MCP_TOKEN='replace-with-random-secret'
+export TASKFERRY_MCP_PUBLIC_URL='https://mcp.example.com'
+export TASKFERRY_MCP_OAUTH_SECRET="$(openssl rand -base64 32)"   # or TASKFERRY_MCP_OAUTH_SECRET_FILE
+node src/server.ts --listen-port 8787
+```
+
+`TASKFERRY_MCP_PUBLIC_URL` is the bare `https` origin clients use, with no path; the MCP endpoint is always `<origin>/mcp`, and tokens are bound to that exact URL. `http` is accepted only for a loopback host, for local testing. The approval secret is at least 24 characters, must differ from the bridge and gateway tokens, and comes from the variable or a private file, never a flag or config key. Any OAuth setting without a public URL is a configuration error.
+
+**Reachability.** The client's servers, not your browser, fetch the discovery documents, register, and redeem codes, so the public URL must reach this listener from the internet. Put a TLS-terminating tunnel or reverse proxy in front of the loopback port and forward the path and public `Host` unchanged. The loopback `Host` check accepts that public hostname (hostname only, scheme and port ignored) and nothing else. Do not put another authentication layer in front of `/mcp`, `/oauth/*` or `/.well-known/*`: the client cannot satisfy it. If you firewall by source address, Anthropic documents the address range its connector traffic comes from; check their current connector documentation rather than this file.
+
+**Adding it to a client.** In claude.ai, add a custom connector with the URL `https://mcp.example.com/mcp` and leave any client ID and secret blank; the client registers itself. For Claude Code, add an HTTP MCP server with that URL and authenticate from its `/mcp` menu. Either way the client opens the consent page in your browser; check the client name and the host shown, then enter the approval secret. Both of these client flows are written from the vendor documentation and are **not verified against the real products**; see Limitations.
+
+| Endpoint                                      | Purpose                                                                |
+| --------------------------------------------- | ---------------------------------------------------------------------- |
+| `/.well-known/oauth-protected-resource[/mcp]` | RFC 9728 metadata; `resource` equals `<origin>/mcp`                    |
+| `/.well-known/oauth-authorization-server`     | RFC 8414 metadata; S256 only, public clients only, `iss` supported     |
+| `/oauth/register`                             | RFC 7591 dynamic registration, redirect URIs checked against allowlist |
+| `/oauth/authorize`                            | Consent page (GET) and decision (POST)                                 |
+| `/oauth/token`                                | `authorization_code` and `refresh_token` grants, form-encoded          |
+| `/oauth/revoke`                               | RFC 7009 revocation                                                    |
+
+An unauthenticated `POST /mcp` returns 401 with `WWW-Authenticate: Bearer resource_metadata="..."`, which is how clients find the rest. Without OAuth configured none of these paths exist and the 401 is the plain `Bearer` it always was. The OAuth endpoints are served on the bridge surface only; the gateway surface has no OAuth and refuses OAuth tokens.
+
+**Client ID Metadata Documents.** Besides dynamic registration, the server accepts a client whose `client_id` is an `https` URL, per `draft-ietf-oauth-client-id-metadata-document` and the MCP 2025-11-25 authorization profile; the discovery document advertises `client_id_metadata_document_supported: true`. On first sight of such a client the bridge fetches the document (no redirects, `application/json` only, 5 KB and 5 s limits), requires `client_id` to equal the URL and `redirect_uris` to match the same allowlist registration uses, and refuses documents that carry a client secret, a token-endpoint auth method other than `none`, or unsupported grant/response types. Documents are cached for the `Cache-Control` lifetime, clamped to 60 seconds to 1 hour (5 minutes by default); `no-store`, `no-cache`, a zero or a malformed `max-age` disable caching. Concurrent sign-ins naming one document share a single fetch, at most 20 distinct documents are fetched at once, and token exchange, refresh and revocation use the stored grant without re-fetching the document. URLs with dot segments, credentials, fragments or non-root paths, and hosts that are IP literals, `localhost`, or under `.localhost`, `.local`, `.internal` or `.home.arpa`, are refused. DNS answers must all be public; the connection is pinned to a validated address while TLS verifies the hostname.
+
+**Lifetimes.** Authorization codes last 60 seconds and work once. Access tokens last one hour and live in memory only. Refresh tokens last 30 days and rotate on every use; presenting an already-used refresh token, or replaying a spent code, revokes every token descended from that sign-in. The state file (`oauth.json`, mode 0600 in a 0700 directory) holds SHA-256 hashes of refresh tokens, the hash of each spent authorization code with the family it belonged to, and the clients they name; never a token or the approval secret. At most 1000 spent-code hashes and 1000 access tokens are remembered, oldest first out. A restart drops access tokens and pending sign-ins; clients refresh without asking you again. To revoke everything, stop the bridge and delete the state file.
+
+**Redirect allowlist.** A client can only register redirect URIs that match the allowlist. The default is Claude's two callback URLs plus loopback HTTP on any port and path, which is what Claude Code uses. `--oauth-allowed-redirects` replaces the list: a comma-separated set of exact `https` URLs, plus the keyword `loopback`. Another MCP client has to be added here on purpose. An empty value counts as unset and restores the default.
+
+**What a grant is worth.** There is one scope, `taskferry`, and it is the whole tool surface: the same authority as the bridge token, including dispatch within the allowlists and the host-wide `taskferry_files` read. Approve only a client you started yourself, just now; the consent page says so. Approval is a single factor (the secret) given to whoever can start a flow, so a convincing link sent to you is the realistic attack: an attacker's client registers, you are talked into approving it, and its code goes to the redirect it registered. The allowlist limits where a code can go, not who started the flow. Wrong secrets are rate-limited globally (10 failures in 10 minutes, then 429 for everyone, denial still works), because behind a tunnel every request shares one source address.
 
 ## MCP Events webhooks
 
@@ -282,9 +322,10 @@ walk the full message without confirming.
 
 - Real TaskFerry integration live passes cover health, list, status, result, message, worktree, summary, dispatch, and dispatched-task results. Changeset accept/reject and cancel are unit-tested against the stub only, because a live call would mutate a real workspace. Resume is covered by unit tests and a live pass that recalled a codeword from the source session. Queue behavior under load, concurrent clients, non-default executors, and very long summaries are still untested. Dispatch stays disabled until both allowlists are set, and read-only binds stay disabled until the bind allowlist is set.
 - MCP compatibility is verified against the official SDK client and raw JSON-RPC over HTTP. The bridge answers with JSON only, so a client that requires SSE or sessions will fail.
-- The suite has 197 cases and does not cover the B01-B18 matrix from the design plan, which is not in this repo.
+- The suite has 302 cases and does not cover the B01-B18 matrix from the design plan, which is not in this repo.
 - MCP Events are tested against a stub callback receiver, not a real ChatGPT registration or delivery. The bridge also exposes no public callback endpoint itself, so deployment reachability and OpenAI-side verification remain open gates. TaskFerry events have no replay, so a bridge restart or daemon disconnect loses the events in the gap by design.
 - Dispatch has no durable idempotency. Do not retry an ambiguous failure automatically.
+- OAuth is verified against the official MCP SDK client (discovery, registration, PKCE, the redirect with `iss`, token exchange, refresh) and raw HTTP tests, not against claude.ai, Claude Code or any other real client. Client ID Metadata Documents are verified through an injected fetch and an end-to-end sign-in, not against a live third-party metadata host. Per-tool scopes, a login through an external identity provider, a refresh retry grace window and per-source rate limiting are not implemented. Caching never re-checks a document before its TTL expires. Anyone who can reach the public URL can register or name up to 100 pending clients, which blocks further registrations for up to an hour; limit that at the tunnel.
 - `taskferry_files` is intentionally host-wide on both authenticated surfaces for the MCP process OS user: authentication and filesystem permissions are its only boundaries. A gateway token carries the same host-read authority as the bridge token, including the bridge token file or process environment when the service user can read it; the tokens are not separate filesystem principals. Do not expose either surface to a principal that should not read the host. The other tools keep their workspace, model, and bind allowlists.
 - `taskferry_files` resolves and stats a path before opening it, so a component replaced in between can open a different target; `O_NOFOLLOW` pins only the final component, and the reported `path` comes from `/proc/self/fd` or `/dev/fd` when available, falling back to the pre-open resolution. Binary detection is per page, so a page of valid UTF-8 without NUL bytes reads as text even when the rest of the file is binary. For zero-size virtual files an EOF probe decides `truncated`, and a failed probe conservatively reports `truncated: true`. A short read before the planned window is EOF even when the stat size is larger (sysfs pads `st_size` to a page), and a descriptor that rejects offset reads is retried sequentially with a 4 MiB cap. A path whose name is not valid UTF-8 is reachable by passing `pathBase64` with the raw absolute path bytes; `path` and `pathBase64` are mutually exclusive. A directory page scans every entry to keep exact name order and total, so its work grows with the directory size even though the response is bounded; entry names with invalid UTF-8 bytes are decoded lossily for `name`, but their raw bytes remain reachable through `nameBase64` and `nextAfterBase64` / `afterBase64`.
 - The gateway surface is part of the bridge process, not a prototype forwarder. A Sites-native handler and a real deployment still need the Sites runtime and API.

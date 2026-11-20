@@ -4,6 +4,47 @@ Working-as-designed behavior a reader would reasonably file as broken. A real
 bug goes in the issue tracker. When a later change restores the "obvious"
 behavior, delete the entry.
 
+## Timed-out CIMD DNS lookups can keep metadata capacity unavailable
+
+**Observe:** CIMD host lookups can be refused even after earlier lookup requests
+timed out.
+
+**Why:** the resolver admits at most two underlying CIMD system lookups.
+Webhook lookups remain uncapped, as before. Both classes still share libuv's
+getaddrinfo worker pool, so CIMD admission limits do not guarantee execution-resource
+isolation for webhooks.
+A timeout cannot cancel one, so its slot remains occupied until it settles.
+If lookups remain stuck permanently, capacity remains unavailable; this is the
+tradeoff required to bound outstanding system work.
+
+**Becomes a bug if:** a slot stays occupied after its underlying lookup settles,
+or more than two underlying CIMD lookups are admitted at once.
+
+## A small CIMD document can exceed the compression limits
+
+**Observe:** a metadata document below the 5 KB final body limit is refused if
+it uses more than three content encodings or an intermediate decoding stage
+exceeds 5 KB.
+
+**Why:** each decoding layer consumes resources before the final document is
+checked. The stage count and intermediate limits bound that work for responses
+from untrusted hosts (`src/oauth-cimd.ts`).
+
+**Becomes a bug if:** a response within those limits is rejected by these checks,
+or a decoding stage can exceed its limit without being rejected.
+
+## A CIMD hostname can be refused before DNS
+
+**Observe:** a metadata URL with a single-label hostname or a `.test` or
+`.invalid` suffix is refused even if a local resolver could return a public
+address for it.
+
+**Why:** the pinned transport shares the webhook's conservative hostname check
+before resolving and validating every DNS answer (`src/webhook.ts`).
+
+**Becomes a bug if:** an ordinary fully qualified public hostname is rejected by
+this name check, or a refused hostname reaches the connection step.
+
 ## The bridge and gateway only accept loopback connections
 
 **Observe:** with `--listen-port`, `curl http://<this-host's-LAN-or-tailnet-IP>:<port>/mcp`
@@ -433,3 +474,139 @@ task. The daemon CLI stays permissive for host-side use.
 
 **Becomes a bug if:** a settled task is refused, or a resume is blocked after
 the source task has ended but before its record updates.
+
+## Wrong approval secrets lock approval for everyone for ten minutes
+
+**Observe:** after ten wrong secrets on the consent page, even the right secret gets a 429 with `Retry-After`, and the owner is locked out along with whoever guessed. Pressing Deny still works.
+
+**Why:** the limiter is global, not per client or per address. Behind a tunnel every request arrives from one source address, so a per-address limit would limit nothing, and the approval secret is the only thing between an internet-reachable consent page and a full tool grant. The cost is that anyone who can register a client and open its consent page can keep the owner from approving for the length of the window. Denial never needs the secret so the lockout cannot trap a pending request open.
+
+**Becomes a bug if:** a wrong guess is not counted, the right secret is accepted while locked, or Deny starts requiring the secret.
+
+## Registering a client can fail with 503 although nothing is wrong
+
+**Observe:** `POST /oauth/register` returns `503 temporarily_unavailable` after about a hundred registrations, and a client that never completed approval stops existing after an hour.
+
+**Why:** registration is unauthenticated by design, because a client has no credential before it signs in. Unapproved registrations are held in memory only, capped at 100, and dropped after an hour, so an anonymous caller can neither grow the state file nor hold slots forever. A registration becomes durable only when a refresh token names it. The cap can still be filled by a caller who wants to block new sign-ins for up to an hour; per-source limits belong at the tunnel.
+
+**Becomes a bug if:** unapproved clients reach `oauth.json`, or approved clients are dropped while their refresh token is live.
+
+## A restart makes clients refresh, and a sign-in in flight fails
+
+**Observe:** after the bridge restarts, the first MCP call from a connected client gets a 401 and then succeeds on its own. A consent page left open across the restart answers "expired or already used".
+
+**Why:** access tokens, authorization codes and pending sign-ins live in memory; only refresh-token hashes and their clients are written to disk. A client that holds a refresh token recovers without asking the owner again. Persisting access tokens would put live bearer credentials in a file for no gain.
+
+**Becomes a bug if:** a client with a valid refresh token is asked to re-approve after a restart, or an access token survives one.
+
+## A lost refresh response forces a new approval
+
+**Observe:** if a client's refresh succeeded on the server but the response never arrived, its retry is refused with `invalid_grant` and every token from that sign-in stops working. The owner has to approve again.
+
+**Why:** refresh tokens rotate, and presenting an already-used one is treated as theft: the whole family is revoked. There is no grace window in which a retry is tolerated. For one owner, re-approving is cheap and a stolen refresh token is not, so the strict rule was chosen. A short grace window would be the fix if this turns out to happen in practice.
+
+**Becomes a bug if:** a first, correct use of a refresh token is refused, or a replay is accepted.
+
+## `/mcp` challenges with `resource_metadata` only when OAuth is configured
+
+**Observe:** the same unauthenticated request gets `WWW-Authenticate: Bearer` on one deployment and `Bearer resource_metadata="..."` on another, and the second adds `error="invalid_token"` when a bad token was sent.
+
+**Why:** the metadata URL is how an OAuth client finds the authorization server, and a deployment without a public URL has none to point at. A request with no credential gets the bare challenge; one with a rejected credential also gets the RFC 6750 error. The gateway surface never advertises OAuth, because it has none.
+
+**Becomes a bug if:** the challenge names a metadata URL on a deployment with OAuth off, or omits it with OAuth on.
+
+## The static bearer token skips the consent page
+
+**Observe:** with OAuth enabled, `Authorization: Bearer <TASKFERRY_MCP_TOKEN>` still opens `/mcp` with no sign-in, no expiry and no revocation.
+
+**Why:** OAuth is an additional way in, not a replacement, so existing local clients and scripts keep working. The static token was always the same authority as a grant. Retiring it is a deployment choice, not something the bridge does.
+
+**Becomes a bug if:** an OAuth access token carries more authority than the static token, or the static token is accepted on the OAuth endpoints as a credential.
+
+## The scope parameter is accepted but grants nothing extra
+
+**Observe:** a client that requests `taskferry offline_access` or nothing at all gets the same grant, with `scope: taskferry`. An unknown scope is refused with `invalid_scope`.
+
+**Why:** there is one real scope and it is the whole tool surface, the same authority as the bridge token. `offline_access` is accepted beside `taskferry` because Claude adds it when the server lists it, and a refresh token is always issued anyway. A request naming only `offline_access` is refused with `invalid_scope`, because granting `taskferry` would hand out a scope the client never asked for. Per-tool scopes would be a new design, not a bug fix.
+
+**Becomes a bug if:** a client can obtain a scope that was not requested, or a refresh can widen the granted scope.
+
+## Revoking an OAuth client does not remove its event subscriptions
+
+**Observe:** after `/oauth/revoke` or a family revocation, webhook subscriptions the client created with `events/subscribe` keep delivering.
+
+**Why:** subscriptions belong to the surface principal (`bridge`), not to a token, so they are shared by every caller on that surface, including the static token. Their life is governed by their own unsubscribe and expiry, as before OAuth existed.
+
+**Becomes a bug if:** a subscription becomes visible to or removable by a caller on the other surface, or outlives its own expiry.
+
+## The loopback guard accepts the public hostname, matching on hostname alone
+
+**Observe:** in TCP mode, a request whose `Host` is `127.0.0.1` or the configured public hostname passes, whatever its scheme or port, and `Origin` is checked the same way.
+
+**Why:** a tunnel forwards the public `Host` to the loopback listener, so refusing it would make the deployment unreachable. The SDK helpers compare hostnames only. Every other hostname is still refused with 403, including on the OAuth endpoints, and the public hostname is accepted only when OAuth is configured.
+
+**Becomes a bug if:** any other hostname passes, the public hostname passes with OAuth off, or an OAuth endpoint skips the guard.
+
+## An empty redirect allowlist restores the default instead of allowing nothing
+
+**Observe:** `TASKFERRY_MCP_OAUTH_ALLOWED_REDIRECTS=` (empty) leaves Claude's callbacks and loopback allowed.
+
+**Why:** an empty environment variable counts as unset for every setting in this bridge. The default list is the narrow one, so the fallback fails safe. To allow only one client, name its callback.
+
+**Becomes a bug if:** an empty value widens the list beyond the default, or a malformed non-empty value is ignored instead of refused.
+
+## A client metadata document is trusted until its cache lifetime expires
+
+**Observe:** after a client changes the redirect URIs or `client_name` in its metadata document, the bridge keeps using the old values for up to an hour, and a document the server cannot fetch is retried on every request.
+
+**Why:** the document is fetched on demand and cached for its `Cache-Control` lifetime, clamped to 60 seconds to 1 hour with a 5-minute default, so a hot client costs one fetch rather than one per request. Refusals are not cached, because an outage should not outlast its cause. `no-cache`, `no-store`, a zero `max-age` and a malformed `max-age` all mean the document is not reused, so a revalidation directive is never silently upgraded into a five-minute trust window. The allowlist still decides every redirect destination, so a stale document can only narrow what the client may use.
+
+**Becomes a bug if:** the cache outlives an hour, or a rejected request still redirects to a URI the current document does not list.
+
+## A client metadata URL on a private-network name is refused even if it is reachable
+
+**Observe:** registering a client whose `client_id` is an `https` URL on a literal private address such as `https://10.0.0.5/client.json`, or on a `localhost`/`.local`/`.internal`/`.home.arpa` name, is refused; a URL over plain `http` is refused too.
+
+**Why:** the bridge fetches the document from its own network position, so an unrestricted URL is a server-side request forgery primitive. The bridge rejects literal addresses and local names, checks all DNS answers, and pins the connection to a public answer.
+
+**Becomes a bug if:** a refused URL is fetched anyway, or the guard is applied to the client's own redirect destinations instead of the metadata URL.
+
+## The oldest access token or spent code is forgotten at the cap
+
+**Observe:** past 1000 live access tokens or 1000 remembered spent codes, the oldest entry is evicted silently. A replayed code that was evicted is refused as unknown rather than revoking its family.
+
+**Why:** the cap bounds memory for a single-owner server whose clients are few; a sign-in older than a thousand tokens or codes is not a live attack signal, and the replay is still refused. Refresh-token rotation at the cap reclaims an older rotated record for room; when every slot holds a live grant, the rotation is refused with a retryable 503 and the presented token stays valid, so its own replay marker is never the record that gets dropped.
+
+**Becomes a bug if:** eviction makes a valid, current token stop working, or a replay of a code that is still inside the cap is accepted.
+
+## The `client_id` is shown as a hostname on the consent page
+
+**Observe:** the consent page for a Client ID Metadata Document client shows only the URL's host, not its full path, and the page never fetches the document a second time.
+
+**Why:** the host is the part the owner can read and compare; the path is kept to validate the document against the URL and to check redirects, not to display. The document was already fetched and validated to reach this page.
+
+**Becomes a bug if:** two different client URLs on one host are shown identically in a way that changes what the owner is approving.
+
+## Token and revocation requests never re-fetch client metadata
+
+**Observe:** after a Client ID Metadata Document client signs in, token exchange, refresh and `/oauth/revoke` keep working while the document's host is down or the document has been withdrawn. A `client_id` that is URL-shaped is accepted on its form alone at those endpoints.
+
+**Why:** the authorization code or refresh record already binds the client it was issued to, and a revocation that depends on the reported attacker's host staying reachable is not a revocation. Refusing an unrecognized plain `client_id` still returns `invalid_client`, and a URL-shaped id that does not match the stored grant is refused as `invalid_grant`. Only the authorize endpoint needs the document, for the redirect list and the consent page.
+
+**Becomes a bug if:** a token request mints a token for a client the grant does not name, or revocation stops working for a registered client.
+
+## A burst of distinct metadata documents is refused past a fixed in-flight cap
+
+**Observe:** with 20 metadata fetches already in flight, a 21st distinct client id is treated as an unknown client until one finishes. Repeated requests for the same id share a single fetch.
+
+**Why:** the cache bounds completed documents but not concurrent outbound requests, and anyone who can reach the authorize endpoint can name new ids. Fetching 20 at a time bounds sockets and memory; the refusal is a safe error, and a retry after a slot frees up fetches normally.
+
+**Becomes a bug if:** the cap rejects a client whose document is already cached, or requests for one id open more than one connection at a time.
+
+## Every IP literal is refused as a metadata host, including a public one
+
+**Observe:** `https://8.8.8.8/client.json` is refused even though the address is public, while the same document on a hostname is fetched.
+
+**Why:** the guard refuses all IP literals rather than trying to classify private ranges. That removes the IPv6 bracket-normalization trap that let bracketed literals through, and a metadata document is expected to live at a stable named URL. DNS answers are checked separately before connecting.
+
+**Becomes a bug if:** a URL-shaped client id with a hostname is refused for being an address, or a bracketed IPv6 literal reaches the fetcher.

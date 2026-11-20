@@ -1,19 +1,7 @@
-import {
-  chmodSync,
-  closeSync,
-  existsSync,
-  fsyncSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  renameSync,
-  unlinkSync,
-  writeSync,
-} from 'node:fs';
-import { randomUUID } from 'node:crypto';
-import path from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
 import { EVENT_NAMES, type EventName } from './event-catalog.ts';
 import type { Json } from './daemon.ts';
+import { writePrivate } from './private-file.ts';
 
 export const MAX_SUBSCRIPTIONS = 1000;
 const STORE_VERSION = 1;
@@ -87,29 +75,6 @@ function parseSubscription(value: unknown): StoredSubscription {
     arguments: entry.arguments,
     refreshBefore: entry.refreshBefore,
   };
-}
-
-function writePrivate(file: string, body: string) {
-  mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-  const temp = `${file}.${process.pid}.${randomUUID()}.tmp`;
-  const fd = openSync(temp, 'wx', 0o600);
-  try {
-    try {
-      writeSync(fd, body);
-      fsyncSync(fd);
-    } finally {
-      closeSync(fd);
-    }
-    renameSync(temp, file);
-    chmodSync(file, 0o600);
-  } catch (error) {
-    try {
-      unlinkSync(temp);
-    } catch {
-      // The temp file may already have been renamed or never created; the original error matters.
-    }
-    throw error;
-  }
 }
 
 // Subscriptions are deliberately synchronous: the file is small, updates are rare, and sync

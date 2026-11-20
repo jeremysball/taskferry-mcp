@@ -514,3 +514,17 @@ test('limit defaults and invalid positive integers', () => {
     }
   }
 });
+
+test('the OAuth state file cannot be the events state file', () => {
+  const shared = '/var/lib/taskferry/state.json';
+  assert.throws(
+    () =>
+      resolve([], {
+        TASKFERRY_MCP_PUBLIC_URL: 'https://mcp.example.com',
+        TASKFERRY_MCP_OAUTH_SECRET: 'o'.repeat(32),
+        TASKFERRY_MCP_OAUTH_STATE: shared,
+        TASKFERRY_MCP_EVENTS_STATE: shared,
+      }),
+    /must differ from the events state path/,
+  );
+});
