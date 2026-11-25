@@ -30,6 +30,7 @@ const INITIALIZE = {
 const WORKER_BINDS = ['skills/searching-the-web', 'skills/using-chhoto'];
 const CONTROLLER_BINDS = ['skills', 'fleet-skills', 'plugins/cache'];
 const SUMMARY_METHOD = 'task.summary';
+const TOOLS_LIST = 'tools/list';
 const bindsUnder = (root: string, relative: readonly string[]) =>
   relative.map((entry) => path.join(root, entry));
 
@@ -39,7 +40,7 @@ test('initialize, discovery and daemon mapping, including fragmented socket resp
     const init = await call(f.url, rpc('initialize', INITIALIZE));
     assert.equal(init.result?.serverInfo?.name, 'taskferry-mcp');
     assert.match(init.result?.instructions ?? '', /taskferry_dispatch/);
-    const tools = await call(f.url, rpc('tools/list'));
+    const tools = await call(f.url, rpc(TOOLS_LIST));
     assert.deepEqual(tools.result?.tools?.map((t) => t.name).sort(), [
       'taskferry_accept',
       'taskferry_cancel',
@@ -68,10 +69,40 @@ test('initialize, discovery and daemon mapping, including fragmented socket resp
   }
 });
 
+test('dispatch advertises narrow directory scope in the tool and directory descriptions', async () => {
+  const f = await fixture();
+  try {
+    const tools = (await call(f.url, rpc(TOOLS_LIST))).result?.tools ?? [];
+    const dispatch = tools.find((tool) => tool.name === 'taskferry_dispatch') as
+      | {
+          description?: string;
+          inputSchema: { properties: { directory?: { description?: string } } };
+        }
+      | undefined;
+    assert.ok(dispatch);
+    const directory = dispatch.inputSchema.properties.directory?.description ?? '';
+    for (const description of [dispatch.description ?? '', directory]) {
+      assert.match(description, /smallest.*existing.*allowed.*writable/i);
+      assert.match(description, /project\/worktree/i);
+      assert.match(description, /scratch/i);
+      assert.match(description, /home.*\/workspace.*filesystem root.*broad parent/i);
+      assert.match(
+        description,
+        /when a copy-on-write overlay is enabled, the directory sets its writable scope and the changeset\/diff scope/i,
+      );
+    }
+    assert.match(dispatch.description ?? '', /controller.*child/i);
+    assert.match(dispatch.description ?? '', /read-only.*mask.*allowlist/i);
+    assert.match(dispatch.description ?? '', /do not disable.*sandbox/i);
+  } finally {
+    await f.close();
+  }
+});
+
 test('every tool schema is strict, and only the write tools are not read-only', async () => {
   const f = await fixture();
   try {
-    const tools = (await call(f.url, rpc('tools/list'))).result?.tools ?? [];
+    const tools = (await call(f.url, rpc(TOOLS_LIST))).result?.tools ?? [];
     assert.equal(tools.length, 14);
     const writes = new Set([
       'taskferry_accept',

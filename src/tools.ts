@@ -66,8 +66,10 @@ const STATUSES = ['queued', 'running', 'done', 'crashed', 'cancelled', 'unknown'
 
 const taskArgs = z.strictObject({ taskId: nonBlank });
 const roBinds = z.array(nonBlank).max(32).optional();
+const directoryGuidance =
+  'Choose the smallest specific existing allowed writable working directory: the exact project/worktree for edits, or a dedicated small scratch/work directory for read-only or cross-project analysis. Never use the home directory, /workspace, filesystem root, or a broad parent just to access other files. When a copy-on-write overlay is enabled, the directory sets its writable scope and the changeset/diff scope.';
 const dispatchInput = z.strictObject({
-  directory: nonBlank,
+  directory: nonBlank.describe(directoryGuidance),
   model: nonBlank,
   prompt: nonBlank,
   variant: nonBlank.max(64).optional(),
@@ -322,8 +324,7 @@ export function registerTools(server: McpServer, scope: ToolScope, deps: Partial
   server.registerTool(
     'taskferry_dispatch',
     {
-      description:
-        'Queue a background task and return its id immediately. Poll taskferry_status until it settles, then read taskferry_result. directory must be an allowed workspace and model an allowed model; call taskferry_models to see allowed ids. executor selects the worker CLI: opencode, pi, or kilo; omit it to use the daemon configured default. The model id is passed through unchanged in provider/model form, which is also how Kilo names its models. variant sets the model reasoning level, for example low, high, xhigh, max, highest, or a model-specific name; omit it for the TaskFerry default. roBind optionally exposes host paths read-only inside the task sandbox; every path must be on the bridge read-only bind allowlist. noSandbox is an optional per-dispatch boolean, false by default: true disables the bwrap filesystem sandbox for this task, so it runs directly on the host filesystem, writes land on real host paths, and no copy-on-write overlay or accept/reject gate applies. That removes filesystem isolation and is not the same as noOverlay. false or omitted requests the normal path, but cannot re-enable the sandbox when the daemon has sandboxing disabled globally. The bridge directory, model, and bind allowlists are enforced before forwarding; they gate what may be dispatched and do not limit what the worker can read or write on the host after an unsandboxed launch.',
+      description: `Queue a background task and return its id immediately. ${directoryGuidance} Apply this rule to controller and child dispatches alike. The standard sandbox already exposes much of the host read-only, subject to masks and allowlists; use permitted read-only paths or binds for other sources. Do not disable the sandbox as a workaround just to read other files. Poll taskferry_status until it settles, then read taskferry_result. directory must be an allowed workspace and model an allowed model; call taskferry_models to see allowed ids. executor selects the worker CLI: opencode, pi, or kilo; omit it to use the daemon configured default. The model id is passed through unchanged in provider/model form, which is also how Kilo names its models. variant sets the model reasoning level, for example low, high, xhigh, max, highest, or a model-specific name; omit it for the TaskFerry default. roBind optionally exposes host paths read-only inside the task sandbox; every path must be on the bridge read-only bind allowlist. noSandbox is an optional per-dispatch boolean, false by default: true disables the bwrap filesystem sandbox for this task, so it runs directly on the host filesystem, writes land on real host paths, and no copy-on-write overlay or accept/reject gate applies. That removes filesystem isolation and is not the same as noOverlay. false or omitted requests the normal path, but cannot re-enable the sandbox when the daemon has sandboxing disabled globally. The bridge directory, model, and bind allowlists are enforced before forwarding; they gate what may be dispatched and do not limit what the worker can read or write on the host after an unsandboxed launch.`,
       inputSchema: dispatchInput,
       annotations: DESTRUCTIVE,
     },
