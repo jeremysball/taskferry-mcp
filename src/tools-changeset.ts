@@ -9,8 +9,8 @@ const cancelArgs = z.strictObject({
   graceMs: z.number().int().min(0).max(300_000).optional(),
 });
 
-// The daemon's accept/reject/cancel methods, exposed behind the same workspace
-// scope guard as the read tools. `force` is deliberately absent: a remote
+// The daemon's accept/reject/cancel methods, exposed behind the workspace
+// scope guard. Historical reads no longer use it. `force` is deliberately absent: a remote
 // caller cannot manually verify a failed check gate, so the bridge leaves the
 // override to the CLI on the host.
 export function registerChangesetTools(server: McpServer, scope: ToolScope) {

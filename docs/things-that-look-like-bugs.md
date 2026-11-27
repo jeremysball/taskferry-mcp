@@ -105,71 +105,52 @@ pins it.
 **Becomes a bug if:** the error is raised even though both variables are set
 (check for a trailing separator: directories split on `:`, models on `,`).
 
-## A task in a deleted or unresolvable directory is "not accessible"
-
-**Observe:** `taskferry_status` or `taskferry_result` fails with "task not
-accessible" for a task that exists, after its working directory was removed or
-renamed.
-
-**Why:** the scope guard resolves the task's directory with `realpath` and
-checks it sits under an allowed root. If the path cannot be resolved the guard
-fails closed instead of guessing.
-
-**Becomes a bug if:** a live task in an allowed directory is refused. That
-points at a symlink or root-resolution problem, not at the intended case.
-
 ## A mistyped task ID says "task not accessible"
 
 **Observe:** `taskferry_status` for an ID that was never issued fails with
-"task not accessible", the same text as for a task in another workspace.
+"task not accessible".
 
-**Why:** the daemon's own "unknown task id" error would let a caller probe
-which IDs exist outside their allowed directories. The scope guard maps the
-daemon's `UNKNOWN_TASK` code to the generic message (`inScopeStatus` in
-`src/tools-shared.ts`; the root check it calls is `inAllowedRoot` in
-`src/scope.ts`). Other daemon failures keep their own
-message so an outage is not mistaken for a permissions problem. Both are
-pinned by tests.
+**Why:** the daemon's own "unknown task id" error would let a caller probe which
+IDs exist. `requestTaskStatus` in `src/tools-shared.ts` maps the daemon's
+`UNKNOWN_TASK` code to the generic message for every task read, and
+`inScopeStatus` reuses it for summary, worktree, resume, accept, reject and
+cancel. Other daemon failures keep their own message so an outage is not
+mistaken for a permissions problem. Both are pinned by tests.
 
 **Becomes a bug if:** the daemon renames the `UNKNOWN_TASK` code. Unknown IDs
 then leak the daemon's wording again. The tests cannot catch that: the stub
 daemon's code is copied from the daemon's source, not read from a live one.
 
-## `taskferry_list` counts only the rows the caller can see
+## Fleet-wide list counts can exceed the returned rows
 
-**Observe:** `taskferry_list` without a directory reports `counts` that add up
-to fewer tasks than the daemon holds, and the missing ones are absent from
-`tasks` too.
+**Observe:** `taskferry_list` with no directory reports `counts` that sum to
+more tasks than the `tasks` array once the fleet holds more than 500 tasks.
 
-**Why:** `visibleList` in `src/tools.ts` filters the daemon's rows through the
-workspace allowlist (`isVisibleRow`) before `countStatuses` runs, so `counts`
-and `tasks` describe the same visible set. Counting foreign rows would disclose
-how many tasks exist in workspaces the bridge is not configured for, which is
-the existence leak the scope guard refuses everywhere else. The daemon's 500-row
-cap applies before the filter, so the `note` field reports when older rows may
-be missing.
+**Why:** the daemon caps `task.list {}` at its newest 500 rows but reports
+`counts` as an all-time tally. The fleet-wide list passes that tally through and
+the `note` field reports the row cap. A deleted-directory filter can only tally
+the rows it matched in that capped reply, which is why its `counts` and `tasks`
+describe the same set.
 
-**Becomes a bug if:** `counts` disagrees with the `tasks` array, or a count
-reveals a workspace outside the allowlist.
+**Becomes a bug if:** `counts` and `tasks` describe different populations
+without the row-cap note, or an exact-match filter counts a row it did not
+return.
 
 ## An empty workspace is a string sentinel, not an empty array
 
-**Observe:** the daemon's raw `task.list` result for an allowed workspace with
-no tasks has `tasks: "none found in this workspace"`, a string. `taskferry_list`
-returns `tasks: []`.
+**Observe:** the daemon's raw `task.list` result for a workspace with no tasks
+has `tasks: "none found in this workspace"`, a string. `taskferry_list` returns
+`tasks: []`.
 
 **Why:** the daemon uses the string as a CLI presentation sentinel. The bridge
 normalizes the two known sentinels (`none found in this workspace` and
 `none found (this server process's lifetime)`) to an empty array in
 `taskListResult` in `src/tools.ts`. Returning the string would violate the
-tool's array contract and abort the single all-workspaces response before its
-rows are filtered through the allowed roots.
+tool's array contract.
 
 **Becomes a bug if:** a new sentinel string appears and the bridge fails closed
 instead of treating that response as empty, or a malformed `tasks` value is
-accepted as empty. The daemon caps an all-workspaces response at its newest 500
-rows, so a busy foreign workspace can push older allowed-workspace rows out;
-that deliberately matches CLI `list --all` and is reported by the row-cap note.
+accepted as empty.
 
 ## Tool failures come back as HTTP 200
 
@@ -610,3 +591,38 @@ the source task has ended but before its record updates.
 **Why:** the guard refuses all IP literals rather than trying to classify private ranges. That removes the IPv6 bracket-normalization trap that let bracketed literals through, and a metadata document is expected to live at a stable named URL. DNS answers are checked separately before connecting.
 
 **Becomes a bug if:** a URL-shaped client id with a hostname is refused for being an address, or a bracketed IPv6 literal reaches the fetcher.
+
+## Historical task reads ignore the workspace allowlist
+
+**Observe:** `taskferry_list`, `taskferry_status`, `taskferry_result` and
+`taskferry_message` return a task dispatched outside every allowed directory,
+and keep returning it after its worktree is deleted.
+
+**Why:** the task store is the authority for history, and an authenticated
+single-owner deployment needs to inspect finished work after its temporary
+worktree is gone. Visibility is decided from recorded daemon data, not by
+statting the dispatch directory, so a deleted or moved workspace does not erase
+the task. Dispatch, resume, summary, changeset, worktree and bind paths still
+enforce the allowlists (`readTaskStatus` versus `inScopeStatus` in
+`src/tools-shared.ts`).
+
+**Becomes a bug if:** an unauthenticated caller can read task history, or a
+mutating or queueing tool stops enforcing the workspace allowlist.
+
+## A deleted directory filter matches only the exact recorded path
+
+**Observe:** `taskferry_list` with `directory` set to a path that no longer
+exists returns only rows whose recorded `directory` equals that path. It does
+not include tasks nested below it or tasks in a linked worktree of the same
+repo, which the daemon's same-workspace filter would have matched while the
+directory existed.
+
+**Why:** the daemon's directory filter realpaths its argument and refuses a path
+it cannot stat. For a deleted path the bridge instead exact-matches the
+all-workspace rows, because no filesystem identity remains to expand to a repo
+root or nested subtree. Omitting `directory` returns the full fleet history,
+including every nested task.
+
+**Becomes a bug if:** a deleted directory filter returns a row recorded under a
+different path, or an existing directory stops using the daemon's
+same-workspace filter.
