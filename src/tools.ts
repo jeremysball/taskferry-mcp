@@ -1,10 +1,10 @@
 import { McpServer } from '@modelcontextprotocol/server';
+import { realpath } from 'node:fs/promises';
+import path from 'node:path';
 import { z } from 'zod';
 import { callDaemon, type Json } from './daemon.ts';
 import { listOpencodeModels } from './models.ts';
-import { inResolvedRoot, resolveRoots } from './scope.ts';
 import {
-  ALLOWLIST_REQUIRED,
   DESTRUCTIVE,
   READ_ONLY,
   WRITES,
@@ -16,6 +16,7 @@ import {
   inScopeStatus,
   nonBlank,
   readTaskResult,
+  readTaskStatus,
   type Executor,
   type ToolDeps,
   type ToolScope,
@@ -92,12 +93,6 @@ const modelArgs = z.strictObject({
   limit: z.number().int().min(1).max(200).optional(),
 });
 
-async function isVisibleRow(row: unknown, roots: readonly string[]) {
-  if (typeof row !== 'object' || row === null) return false;
-  const directory = (row as Json).directory;
-  return typeof directory === 'string' && (await inResolvedRoot(roots, directory));
-}
-
 function countStatuses(rows: readonly Json[]) {
   const counts: Record<string, number> = Object.fromEntries(STATUSES.map((status) => [status, 0]));
   for (const row of rows) {
@@ -120,47 +115,63 @@ function taskListResult(result: unknown): TaskList {
   throw new Error('invalid task.list reply: tasks must be an array');
 }
 
-async function visibleList(results: unknown[], roots: readonly string[]) {
-  const rows = new Map<unknown, Json>();
-  let capped = false;
-  for (const result of results) {
-    const { tasks } = taskListResult(result);
-    capped ||= tasks.length >= LIST_ROW_CAP;
-    for (const row of tasks) {
-      if (await isVisibleRow(row, roots)) rows.set((row as Json).id, row as Json);
-    }
-  }
-  const merged = [...rows.values()].sort((a, b) =>
-    String(b.startedAt ?? '').localeCompare(String(a.startedAt ?? '')),
+const ROW_CAP_NOTE = 'daemon row cap reached; older tasks may be omitted';
+
+function allTaskList(result: unknown): TaskList {
+  const list = taskListResult(result);
+  const tasks = list.tasks.slice(0, LIST_ROW_CAP);
+  return {
+    ...list,
+    counts: list.counts ?? countStatuses(tasks),
+    tasks,
+    ...(list.tasks.length >= LIST_ROW_CAP ? { note: ROW_CAP_NOTE } : {}),
+  };
+}
+
+function exactDirectoryList(result: unknown, directory: string): TaskList {
+  const all = taskListResult(result).tasks;
+  const tasks = all.filter(
+    (row) => typeof row === 'object' && row !== null && (row as Json).directory === directory,
   );
-  capped ||= merged.length > LIST_ROW_CAP;
-  const tasks = merged.slice(0, LIST_ROW_CAP);
   return {
     counts: countStatuses(tasks),
     tasks,
-    ...(capped ? { note: 'daemon row cap reached; older tasks may be omitted' } : {}),
+    ...(all.length >= LIST_ROW_CAP ? { note: ROW_CAP_NOTE } : {}),
   };
+}
+
+async function existingRealpath(directory: string) {
+  try {
+    return await realpath(directory);
+  } catch {
+    return null;
+  }
 }
 
 type ListArgs = { directory?: string; all?: boolean };
 
 async function listTasks(args: ListArgs, scope: ToolScope) {
-  if (!scope.allowDirectories.length) throw new Error(ALLOWLIST_REQUIRED);
   if (args.all === true && args.directory !== undefined) {
     throw new Error('all cannot be combined with directory');
   }
-  const roots = await resolveRoots(scope.allowDirectories);
-  if (args.all === true || args.directory === undefined) {
+  if (args.directory === undefined) {
     // `task.list {}` is the daemon's existing `--all` mode: one request over
-    // the whole recorded history. Filtering those rows through the allowed
-    // roots preserves workspace authorization and still covers tasks nested
-    // below an allowed root. Do not enumerate roots into directory requests:
-    // that fragments history, misses nested tasks the daemon would return,
-    // and is not the RPC's all-tasks semantics.
-    return visibleList([await callDaemon(scope, 'task.list', {})], roots);
+    // the whole recorded history. Historical reads are fleet-wide for an
+    // authenticated caller, so rows are not filtered through allowed roots;
+    // that filter hid every task whose worktree had since been removed.
+    return allTaskList(await callDaemon(scope, 'task.list', {}));
   }
-  const real = await assertAllowedDirectory(args.directory, scope, roots);
-  return taskListResult(await callDaemon(scope, 'task.list', { directory: real }));
+  const real = await existingRealpath(args.directory);
+  if (real !== null) {
+    // directory is a filter, not an authorization boundary: any existing
+    // absolute workspace may be named, including one outside the roots.
+    return taskListResult(await callDaemon(scope, 'task.list', { directory: real }));
+  }
+  // The daemon's directory filter realpaths its argument and refuses a path
+  // it cannot stat, so a removed worktree cannot be asked for directly.
+  // Exact-match its rows from the all-task reply instead; this reads daemon
+  // data only and grants no filesystem access.
+  return exactDirectoryList(await callDaemon(scope, 'task.list', {}), path.resolve(args.directory));
 }
 const listArgs = z.strictObject({
   directory: nonBlank.optional(),
@@ -270,7 +281,7 @@ export function registerTools(server: McpServer, scope: ToolScope, deps: Partial
     'taskferry_list',
     {
       description:
-        'List recent tasks across all allowed workspaces, newest first, capped at 500 rows. With no arguments it lists every allowed workspace. Pass directory to scope the list to one allowed workspace, or all: true to request every allowed workspace explicitly; all cannot be combined with directory, and all: false is treated as omitted. Each row carries id, status, model, startedAt, directory and failureReason; use taskferry_status for full lifecycle and log fields.',
+        'List recent tasks across the whole authenticated fleet, newest first, capped at 500 rows. With no arguments it lists every recorded workspace, including tasks whose dispatch directory has since been deleted. Pass directory to filter to one workspace path (a filter, not an authorization boundary; a deleted absolute directory is matched exactly against recorded rows), or all: true for the explicit fleet-wide request; all cannot be combined with directory, and all: false is treated as omitted. Each row carries id, status, model, startedAt, directory and failureReason; use taskferry_status for full lifecycle and log fields.',
       inputSchema: listArgs,
       annotations: READ_ONLY,
     },
@@ -292,18 +303,18 @@ export function registerTools(server: McpServer, scope: ToolScope, deps: Partial
     'taskferry_status',
     {
       description:
-        'Read one task state and metadata. Poll this after taskferry_dispatch; a queued task has not started yet.',
+        'Read one task state and metadata, including tasks whose dispatch directory has since been deleted. Poll this after taskferry_dispatch; a queued task has not started yet.',
       inputSchema: taskArgs,
       annotations: READ_ONLY,
     },
-    async ({ taskId }) => asText(await inScopeStatus(taskId, scope)),
+    async ({ taskId }) => asText(await readTaskStatus(taskId, scope)),
   );
 
   server.registerTool(
     'taskferry_result',
     {
       description:
-        'Read a settled task final message and result metadata. fields selects specific result fields; full returns the complete narration and requires narration in fields. This first reads task status to enforce the workspace allowlist.',
+        'Read a settled task final message and result metadata. fields selects specific result fields; full returns the complete narration and requires narration in fields. Historical reads are fleet-wide for an authenticated caller, including tasks whose dispatch directory has since been deleted.',
       inputSchema: resultArgs,
       annotations: READ_ONLY,
     },

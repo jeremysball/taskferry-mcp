@@ -1,32 +1,25 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync } from 'node:fs';
-import path from 'node:path';
-import fsPromises from 'node:fs/promises';
-import { syncBuiltinESMExports } from 'node:module';
+import { realpathSync } from 'node:fs';
 import { call, okReply, removeDir, startBridge, stubDaemon, tempDir, toolCall } from './helpers.ts';
 
 const FOREIGN_PREFIX = 'tf-list-foreign-';
 
-test('list without a directory shows only rows inside allowed workspaces', async () => {
+test('list without a directory returns every recorded task, including deleted and outside workspaces', async () => {
   const foreign = tempDir(FOREIGN_PREFIX);
   let root = '';
-  let sibling = '';
   const daemon = await stubDaemon((req) =>
     okReply(req, {
-      counts: { queued: 0, running: 0, done: 3, crashed: 0, cancelled: 0, unknown: 0 },
+      counts: { queued: 0, running: 0, done: 4, crashed: 0, cancelled: 0, unknown: 0 },
       tasks: [
         { id: 'inside', status: 'done', directory: root },
-        { id: 'nested', status: 'done', directory: `${root}/child` },
-        { id: 'sibling-prefix', status: 'done', directory: sibling },
+        { id: 'deleted-nested', status: 'done', directory: `${root}/removed-child` },
+        { id: 'deleted-sibling', status: 'done', directory: `${root}-removed-sibling` },
         { id: 'outside', status: 'done', directory: foreign },
       ],
     }),
   );
   root = daemon.dir;
-  sibling = `${root}-sibling`;
-  mkdirSync(`${root}/child`);
-  mkdirSync(sibling);
   const bridge = await startBridge(daemon.socket, { allowDirectories: [daemon.dir] });
   try {
     const res = await call(bridge.url, toolCall('taskferry_list'));
@@ -34,41 +27,38 @@ test('list without a directory shows only rows inside allowed workspaces', async
     const body = JSON.parse(res.result?.content?.[0]?.text ?? '');
     assert.deepEqual(
       body.tasks.map((task: { id: string }) => task.id),
-      ['inside', 'nested'],
+      ['inside', 'deleted-nested', 'deleted-sibling', 'outside'],
     );
-    assert.equal(body.counts.done, 2);
+    assert.equal(body.counts.done, 4);
     assert.equal(daemon.calls.length, 1);
     assert.deepEqual(daemon.calls[0]?.params, {});
   } finally {
     await bridge.close();
     await daemon.close();
     removeDir(foreign);
-    removeDir(sibling);
   }
 });
 
-test('list all: true is an explicit fleet-wide request and cannot combine with directory', async () => {
-  const second = tempDir('tf-list-second-');
+test('list all: true is the explicit fleet-wide request and cannot combine with directory', async () => {
   const foreign = tempDir(FOREIGN_PREFIX);
   let root = '';
   const daemon = await stubDaemon((req) =>
     okReply(req, {
       tasks: [
         { id: 'inside', status: 'done', directory: root },
-        { id: 'second-root', status: 'done', directory: second },
         { id: 'outside', status: 'done', directory: foreign },
       ],
     }),
   );
   root = daemon.dir;
-  const bridge = await startBridge(daemon.socket, { allowDirectories: [root, second] });
+  const bridge = await startBridge(daemon.socket, { allowDirectories: [root] });
   try {
     const response = await call(bridge.url, toolCall('taskferry_list', { all: true }));
     assert.notEqual(response.result?.isError, true);
     const body = JSON.parse(response.result?.content?.[0]?.text ?? '{}');
     assert.deepEqual(
       body.tasks.map((task: { id: string }) => task.id),
-      ['inside', 'second-root'],
+      ['inside', 'outside'],
     );
     assert.equal(daemon.calls.length, 1);
     assert.deepEqual(daemon.calls[0]?.params, {});
@@ -86,19 +76,26 @@ test('list all: true is an explicit fleet-wide request and cannot combine with d
   } finally {
     await bridge.close();
     await daemon.close();
-    removeDir(second);
     removeDir(foreign);
   }
 });
 
-test('list all: true still fails closed without a workspace allowlist', async () => {
-  const daemon = await stubDaemon((req) => okReply(req, { tasks: [] }));
+test('historical listing does not require a workspace allowlist', async () => {
+  const daemon = await stubDaemon((req) =>
+    okReply(req, {
+      tasks: [{ id: 'any', status: 'done', directory: '/some/deleted-workspace' }],
+    }),
+  );
   const bridge = await startBridge(daemon.socket);
   try {
-    const response = await call(bridge.url, toolCall('taskferry_list', { all: true }));
-    assert.equal(response.result?.isError, true);
-    assert.match(response.result?.content?.[0]?.text ?? '', /workspace allowlist required/);
-    assert.equal(daemon.calls.length, 0);
+    const response = await call(bridge.url, toolCall('taskferry_list'));
+    assert.notEqual(response.result?.isError, true);
+    const body = JSON.parse(response.result?.content?.[0]?.text ?? '{}');
+    assert.deepEqual(
+      body.tasks.map((task: { id: string }) => task.id),
+      ['any'],
+    );
+    assert.equal(daemon.calls.length, 1);
   } finally {
     await bridge.close();
     await daemon.close();
@@ -156,75 +153,80 @@ test('an empty scoped task list sentinel becomes an empty array', async () => {
   }
 });
 
-test('a multi-root list uses one all-tasks request and filters every root', async () => {
-  const second = tempDir('tf-second-');
-  const foreign = tempDir(FOREIGN_PREFIX);
+test('an existing directory outside the allowlist is a list filter, not a denial', async () => {
+  const outside = tempDir('tf-list-outside-');
+  const daemon = await stubDaemon((req) => okReply(req, { counts: {}, tasks: [] }));
+  const bridge = await startBridge(daemon.socket, { allowDirectories: [daemon.dir] });
+  try {
+    const response = await call(bridge.url, toolCall('taskferry_list', { directory: outside }));
+    assert.notEqual(response.result?.isError, true);
+    assert.deepEqual(daemon.calls[0]?.params, { directory: realpathSync(outside) });
+  } finally {
+    await bridge.close();
+    await daemon.close();
+    removeDir(outside);
+  }
+});
+
+test('a deleted absolute directory filters the all-task rows by exact path', async () => {
   let root = '';
+  const deleted = () => `${root}/removed-child`;
   const daemon = await stubDaemon((req) =>
     okReply(req, {
       tasks: [
-        { id: 'root-row', directory: root, status: 'done' },
-        { id: 'nested-row', directory: `${root}/nested`, status: 'done' },
-        { id: 'second-row', directory: second, status: 'done' },
-        { id: 'foreign-row', directory: foreign, status: 'done' },
+        { id: 'exact', status: 'done', directory: deleted() },
+        { id: 'nested', status: 'done', directory: `${deleted()}/nested` },
+        { id: 'sibling-prefix', status: 'done', directory: `${deleted()}-sibling` },
+        { id: 'inside', status: 'done', directory: root },
       ],
     }),
   );
   root = daemon.dir;
-  mkdirSync(`${root}/nested`);
-  const bridge = await startBridge(daemon.socket, { allowDirectories: [root, second] });
+  const bridge = await startBridge(daemon.socket, { allowDirectories: [root] });
   try {
-    const response = await call(bridge.url, toolCall('taskferry_list'));
+    const response = await call(bridge.url, toolCall('taskferry_list', { directory: deleted() }));
     assert.notEqual(response.result?.isError, true);
     const body = JSON.parse(response.result?.content?.[0]?.text ?? '{}');
     assert.deepEqual(
-      body.tasks.map((row: { id: string }) => row.id),
-      ['root-row', 'nested-row', 'second-row'],
+      body.tasks.map((task: { id: string }) => task.id),
+      ['exact'],
     );
-    assert.equal(body.counts.done, 3);
+    assert.equal(body.counts.done, 1);
     assert.equal(daemon.calls.length, 1);
     assert.deepEqual(daemon.calls[0]?.params, {});
   } finally {
     await bridge.close();
     await daemon.close();
-    removeDir(second);
-    removeDir(foreign);
   }
 });
 
-test('one all-tasks response deduplicates visible rows and reports the daemon row cap', async () => {
-  const second = tempDir('tf-second-');
-  const foreign = tempDir(FOREIGN_PREFIX);
+test('a deleted directory filter reports the daemon row cap when the all-task reply was capped', async () => {
+  let root = '';
   const daemon = await stubDaemon((req) =>
     okReply(req, {
-      tasks: [
-        { id: 'visible', directory: second, status: 'done' },
-        { id: 'visible', directory: second, status: 'done' },
-        ...Array.from({ length: 498 }, (_, i) => ({
-          id: `foreign-${i}`,
-          directory: foreign,
-          status: 'done',
-        })),
-      ],
+      tasks: Array.from({ length: 500 }, (_, i) => ({
+        id: `task-${i}`,
+        status: 'done',
+        directory: i === 0 ? `${root}/removed` : root,
+      })),
     }),
   );
-  const bridge = await startBridge(daemon.socket, { allowDirectories: [daemon.dir, second] });
+  root = daemon.dir;
+  const bridge = await startBridge(daemon.socket, { allowDirectories: [root] });
   try {
-    const response = await call(bridge.url, toolCall('taskferry_list'));
+    const response = await call(
+      bridge.url,
+      toolCall('taskferry_list', { directory: `${root}/removed` }),
+    );
     const body = JSON.parse(response.result?.content?.[0]?.text ?? '{}');
     assert.deepEqual(
-      body.tasks.map((row: { id: string }) => row.id),
-      ['visible'],
+      body.tasks.map((task: { id: string }) => task.id),
+      ['task-0'],
     );
-    assert.equal(body.counts.done, 1);
     assert.match(body.note, /cap reached/);
-    assert.equal(daemon.calls.length, 1);
-    assert.deepEqual(daemon.calls[0]?.params, {});
   } finally {
     await bridge.close();
     await daemon.close();
-    removeDir(second);
-    removeDir(foreign);
   }
 });
 
@@ -249,45 +251,12 @@ test('full result requires an explicit narration projection', async () => {
   }
 });
 
-test('visible listing resolves allowed roots once rather than once per row', async (t) => {
-  let root = '';
-  const daemon = await stubDaemon((req) =>
-    okReply(req, {
-      tasks: Array.from({ length: 10 }, (_, i) => ({
-        id: `task-${i}`,
-        directory: path.join(root, 'child'),
-        status: 'done',
-      })),
-    }),
-  );
-  root = daemon.dir;
-  mkdirSync(path.join(root, 'child'));
-  const bridge = await startBridge(daemon.socket, { allowDirectories: [root] });
-  const original = fsPromises.realpath;
-  let rootResolutions = 0;
-  t.mock.method(fsPromises, 'realpath', async (value: string) => {
-    if (value === root) rootResolutions++;
-    return original(value);
-  });
-  syncBuiltinESMExports();
-  try {
-    const response = await call(bridge.url, toolCall('taskferry_list'));
-    const body = JSON.parse(response.result?.content?.[0]?.text ?? '{}');
-    assert.equal(body.tasks.length, 10);
-    assert.equal(rootResolutions, 1);
-  } finally {
-    t.mock.restoreAll();
-    syncBuiltinESMExports();
-    await bridge.close();
-    await daemon.close();
-  }
-});
-
-test('one all-tasks response retains newest-first ordering and applies a total cap', async () => {
+test('one all-tasks response keeps the daemon order and applies a total cap', async () => {
   const second = tempDir('tf-list-cap-');
   let root = '';
   const daemon = await stubDaemon((req) =>
     okReply(req, {
+      counts: { queued: 0, running: 0, done: 600, crashed: 0, cancelled: 0, unknown: 0 },
       tasks: Array.from({ length: 600 }, (_, i) => ({
         directory: i % 2 === 0 ? root : second,
         id: `task-${i}`,
@@ -302,9 +271,9 @@ test('one all-tasks response retains newest-first ordering and applies a total c
     const response = await call(bridge.url, toolCall('taskferry_list'));
     const body = JSON.parse(response.result?.content?.[0]?.text ?? '{}');
     assert.equal(body.tasks.length, 500);
-    assert.equal(body.counts.done, 500);
-    assert.equal(body.tasks[0].id, 'task-599');
-    assert.equal(body.tasks[499].id, 'task-100');
+    assert.equal(body.counts.done, 600, 'the daemon all-time tally is preserved');
+    assert.equal(body.tasks[0].id, 'task-0');
+    assert.equal(body.tasks[499].id, 'task-499');
     assert.match(body.note, /cap reached/);
     assert.equal(daemon.calls.length, 1);
     assert.deepEqual(daemon.calls[0]?.params, {});

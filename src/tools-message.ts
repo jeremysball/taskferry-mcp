@@ -59,7 +59,7 @@ export function registerMessageTool(server: McpServer, scope: ToolScope) {
     'taskferry_message',
     {
       description:
-        'Read a task final message without truncation. Without confirm: true the result contains only messageChars and a short preview. With confirm: true it returns the entire message, or one page when offset and limit are set; nextOffset names the next page. This first reads task status to enforce the workspace allowlist.',
+        'Read a task final message without truncation, including tasks whose dispatch directory has since been deleted. Without confirm: true the result contains only messageChars and a short preview. With confirm: true it returns the entire message, or one page when offset and limit are set; nextOffset names the next page.',
       inputSchema: messageArgs,
       annotations: READ_ONLY,
     },

@@ -30,6 +30,7 @@ const INITIALIZE = {
 const WORKER_BINDS = ['skills/searching-the-web', 'skills/using-chhoto'];
 const CONTROLLER_BINDS = ['skills', 'fleet-skills', 'plugins/cache'];
 const SUMMARY_METHOD = 'task.summary';
+const TASK_RESULT_METHOD = 'task.result';
 const TOOLS_LIST = 'tools/list';
 const bindsUnder = (root: string, relative: readonly string[]) =>
   relative.map((entry) => path.join(root, entry));
@@ -40,6 +41,9 @@ test('initialize, discovery and daemon mapping, including fragmented socket resp
     const init = await call(f.url, rpc('initialize', INITIALIZE));
     assert.equal(init.result?.serverInfo?.name, 'taskferry-mcp');
     assert.match(init.result?.instructions ?? '', /taskferry_dispatch/);
+    assert.match(init.result?.instructions ?? '', /historical tasks fleet-wide/);
+    assert.match(init.result?.instructions ?? '', /dispatch directory was deleted/);
+    assert.doesNotMatch(init.result?.instructions ?? '', /only see tasks whose directory/);
     const tools = await call(f.url, rpc(TOOLS_LIST));
     assert.deepEqual(tools.result?.tools?.map((t) => t.name).sort(), [
       'taskferry_accept',
@@ -575,8 +579,9 @@ test('rejects arbitrary daemon methods and invalid tool arguments', async () => 
   }
 });
 
-test('cross-workspace status, result and summary are denied before content is requested', async () => {
+test('cross-workspace status and result read history while summary stays scoped', async () => {
   const foreign = tempDir('tf-foreign-workspace-');
+  const foreignTask = 'foreign-task';
   const daemon = await stubDaemon((req) =>
     okReply(
       req,
@@ -587,16 +592,23 @@ test('cross-workspace status, result and summary are denied before content is re
   );
   const bridge = await startBridge(daemon.socket, { allowDirectories: [daemon.dir] });
   try {
-    for (const name of [STATUS_TOOL, 'taskferry_result', 'taskferry_summary']) {
-      const response = await call(bridge.url, toolCall(name, { taskId: 'foreign-task' }));
-      assert.equal(response.result?.isError, true);
-      const text = response.result?.content?.[0]?.text ?? '';
-      assert.ok(!text.includes('SECRET'));
-      assert.ok(!text.includes(foreign));
-    }
+    const status = await call(bridge.url, toolCall(STATUS_TOOL, { taskId: foreignTask }));
+    assert.notEqual(status.result?.isError, true);
+    assert.equal(JSON.parse(status.result?.content?.[0]?.text ?? '{}').directory, foreign);
+
+    const result = await call(bridge.url, toolCall('taskferry_result', { taskId: foreignTask }));
+    assert.notEqual(result.result?.isError, true);
+    assert.equal(JSON.parse(result.result?.content?.[0]?.text ?? '{}').message, 'SECRET');
+
+    const summary = await call(bridge.url, toolCall('taskferry_summary', { taskId: foreignTask }));
+    assert.equal(summary.result?.isError, true);
+    const text = summary.result?.content?.[0]?.text ?? '';
+    assert.ok(!text.includes('SECRET'));
+    assert.ok(!text.includes(foreign));
+
     assert.deepEqual(
       daemon.calls.map((c) => c.method),
-      [TASK_STATUS, TASK_STATUS, TASK_STATUS],
+      [TASK_STATUS, TASK_STATUS, TASK_RESULT_METHOD, TASK_STATUS],
     );
   } finally {
     await bridge.close();
@@ -623,7 +635,7 @@ test('an in-scope task reads through to its result', async () => {
     assert.deepEqual(JSON.parse(res.result?.content?.[0]?.text ?? ''), { message: 'DONE' });
     assert.deepEqual(
       daemon.calls.map((c) => c.method),
-      [TASK_STATUS, 'task.result'],
+      [TASK_STATUS, TASK_RESULT_METHOD],
     );
   } finally {
     await bridge.close();
@@ -709,7 +721,7 @@ test('task.summary gets the summary budget while ordinary calls keep the daemon 
       result = { message: 'DONE' };
     }
     const payload = okReply(req, result);
-    if (req.method !== SUMMARY_METHOD && req.method !== 'task.result') return payload;
+    if (req.method !== SUMMARY_METHOD && req.method !== TASK_RESULT_METHOD) return payload;
     // Hold the reply head open for 300 ms without writing bytes: past the
     // ordinary 100 ms daemon budget but under the 1 s summary budget.
     return [payload.slice(0, 1), ...Array(300).fill(''), payload.slice(1)];

@@ -219,14 +219,15 @@ test('message previews without confirmation, then returns the whole field page b
       bridge.url,
       toolCall(MESSAGE_TOOL, { taskId: FOREIGN_ID, confirm: true }),
     );
-    assert.equal(foreign.result?.isError, true);
-    assert.doesNotMatch(JSON.stringify(foreign), new RegExp(message.slice(0, 40)));
+    assert.notEqual(foreign.result?.isError, true);
+    assert.equal(JSON.parse(foreign.result?.content?.[0]?.text ?? '{}').message, message);
 
     const resultCalls = daemon.calls.filter((c) => c.method === 'task.result');
-    assert.equal(resultCalls.length, 4);
-    for (const resultCall of resultCalls) {
+    assert.equal(resultCalls.length, 5);
+    for (const resultCall of resultCalls.slice(0, 4)) {
       assert.deepEqual(resultCall.params, { taskId: TASK_ID, fields: ['message'] });
     }
+    assert.deepEqual(resultCalls[4]?.params, { taskId: FOREIGN_ID, fields: ['message'] });
   } finally {
     await bridge.close();
     await daemon.close();

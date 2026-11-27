@@ -20,11 +20,11 @@ method directly.
 | Tool                 | Source            | Notes                                                                               |
 | -------------------- | ----------------- | ----------------------------------------------------------------------------------- |
 | `taskferry_health`   | `system.health`   |                                                                                     |
-| `taskferry_list`     | `task.list`       | All allowed workspaces by default; optional directory or all                        |
+| `taskferry_list`     | `task.list`       | All recorded workspaces by default; optional directory filter or all                |
 | `taskferry_models`   | `opencode models` | Allowed ids, missing allowlist entries, optional query                              |
-| `taskferry_status`   | `task.status`     | Scope-guarded; full lifecycle fields                                                |
-| `taskferry_result`   | `task.result`     | Scope-guarded; optional `fields` and `full`                                         |
-| `taskferry_message`  | `task.result`     | Scope-guarded; final message, preview until `confirm: true`                         |
+| `taskferry_status`   | `task.status`     | Fleet-wide historical read; full lifecycle fields                                   |
+| `taskferry_result`   | `task.result`     | Fleet-wide historical read; optional `fields` and `full`                            |
+| `taskferry_message`  | `task.result`     | Fleet-wide historical read; final message, preview until `confirm: true`            |
 | `taskferry_summary`  | `task.summary`    | Scope-guarded; queues a summary task                                                |
 | `taskferry_dispatch` | `task.dispatch`   | Needs both allowlists; optional `executor`, `variant`, `roBind`, `noSandbox`        |
 | `taskferry_resume`   | `task.dispatch`   | Continues a settled task's session; derives workspace/model/executor                |
@@ -168,13 +168,15 @@ Subscriptions survive a restart in a private JSON state file (`0600`, parent `07
 
 **Verified vs. not verified:** the capability advertisement, discovery, subscribe/unsubscribe, verification failure mapping, lifecycle mapping, SSRF rules, signing, persistence, retries and deduplication are covered by this repository's tests against a stub callback receiver and a stub daemon. ChatGPT has not actually delivered an event to this bridge in testing, and this bridge has no public callback-reachable endpoint of its own; a deployment must provide that reachability. Treat ChatGPT-side registration and delivery as unverified until a real end-to-end callback is observed.
 
-## Scope guard
+## Historical read scope
 
-`taskferry_status`, `taskferry_result` and `taskferry_summary` read `task.status` and check the canonical `directory` against the allowed roots before they return status, request result content or queue a summary. A missing or unresolvable directory fails closed. The root check is `inAllowedRoot` in `src/scope.ts`; the scoped status read is `inScopeStatus` in `src/tools-shared.ts`.
+Authenticated readers can read task history fleet-wide. `taskferry_list`, `taskferry_status`, `taskferry_result` and `taskferry_message` do not check a task's dispatch directory against the allowed roots, so a task survives its worktree: a deleted nested worktree, a removed sibling worktree, or a directory outside the current roots still reports. The task store is authoritative, and the bridge does not stat a task directory to decide whether a historical row exists. Authentication on the bridge or gateway is the boundary.
 
-`taskferry_list` without a directory asks the daemon for its newest 500 tasks through the existing `task.list {}` all-workspaces request and filters the rows through the same allowed roots. Passing a directory scopes the list to that workspace, which must itself be under an allowed root. `all: true` is the explicit form of the default fleet-wide request and cannot be combined with `directory`; `all: false` is treated as omitted.
+`taskferry_list` without a directory, or with `all: true`, asks the daemon for its newest 500 all-workspace rows and returns them unfiltered. On that branch `counts` is the daemon's all-time tally, so it can exceed the 500 returned rows; the row-cap note says when rows may be omitted. Passing `directory` filters to that workspace; it is not an authorization boundary. An existing directory is forwarded to the daemon, which applies its own realpath and same-workspace filter. The daemon refuses a directory it cannot stat, so a deleted absolute directory falls back to an exact path match over the newest 500 all-task rows, counting only the rows it matched, and the note reports the cap. `all` cannot be combined with `directory`; `all: false` is treated as omitted.
 
-An unknown task ID and an out-of-scope one both answer "task not accessible", which keeps a caller from probing IDs outside its roots. A live pass confirmed that mapping against the running daemon.
+An unknown task ID still answers "task not accessible", the same as a task the daemon cannot answer for.
+
+Dispatch, resume, summary, accept/reject/cancel, worktree and every mutating path still run the workspace scope check through `inScopeStatus` in `src/tools-shared.ts`. Historical reads use the separate `readTaskStatus` helper, so weakening the read path does not weaken `src/scope.ts` or the write path. Summary still queues a summarizer child, and worktree still confines reads to the task directory.
 
 `taskferry_result` accepts `fields` to select result fields and `full` to return the complete narration. `taskferry_summary` wraps `task.summary`. `mode: "report"` (the default) queues a summarizer and returns a queued summary task in `summaryTask`; the caller polls `taskferry_status` and reads `taskferry_result` against that id. `mode: "activity"` returns the activity snapshot directly, but it is not a free cache read: the daemon force-refreshes and can synchronously launch and wait for a summarizer child, so it may take tens of seconds, and a stale-session continuation retry can poll a second child. The bridge gives `task.summary` the `summaryTimeoutMs` budget (60 seconds by default) rather than the ordinary 5 second daemon timeout.
 
@@ -303,8 +305,9 @@ the pending copy; the workspace is untouched until `taskferry_accept` runs, and
 `taskferry_files` never calls the daemon or applies a changeset.
 
 This is intentionally broader than `taskferry_worktree`, which stays confined
-to a task's dispatch directory. The other write, dispatch, resume, changeset,
-message, result, and bind paths keep their existing allowlists.
+to a task's dispatch directory. The write, dispatch, resume, summary,
+changeset, worktree, and bind paths keep their existing allowlists; only the
+historical reads above are fleet-wide.
 
 ## Full final message
 
@@ -326,7 +329,7 @@ walk the full message without confirming.
 - MCP Events are tested against a stub callback receiver, not a real ChatGPT registration or delivery. The bridge also exposes no public callback endpoint itself, so deployment reachability and OpenAI-side verification remain open gates. TaskFerry events have no replay, so a bridge restart or daemon disconnect loses the events in the gap by design.
 - Dispatch has no durable idempotency. Do not retry an ambiguous failure automatically.
 - OAuth is verified against the official MCP SDK client (discovery, registration, PKCE, the redirect with `iss`, token exchange, refresh) and raw HTTP tests, not against claude.ai, Claude Code or any other real client. Client ID Metadata Documents are verified through an injected fetch and an end-to-end sign-in, not against a live third-party metadata host. Per-tool scopes, a login through an external identity provider, a refresh retry grace window and per-source rate limiting are not implemented. Caching never re-checks a document before its TTL expires. Anyone who can reach the public URL can register or name up to 100 pending clients, which blocks further registrations for up to an hour; limit that at the tunnel.
-- `taskferry_files` is intentionally host-wide on both authenticated surfaces for the MCP process OS user: authentication and filesystem permissions are its only boundaries. A gateway token carries the same host-read authority as the bridge token, including the bridge token file or process environment when the service user can read it; the tokens are not separate filesystem principals. Do not expose either surface to a principal that should not read the host. The other tools keep their workspace, model, and bind allowlists.
+- `taskferry_files` is intentionally host-wide on both authenticated surfaces for the MCP process OS user: authentication and filesystem permissions are its only boundaries. A gateway token carries the same host-read authority as the bridge token, including the bridge token file or process environment when the service user can read it; the tokens are not separate filesystem principals. Do not expose either surface to a principal that should not read the host. Write, dispatch, summary, worktree, and bind paths keep their workspace, model, and bind allowlists; list, status, result, and message are fleet-wide for an authenticated caller.
 - `taskferry_files` resolves and stats a path before opening it, so a component replaced in between can open a different target; `O_NOFOLLOW` pins only the final component, and the reported `path` comes from `/proc/self/fd` or `/dev/fd` when available, falling back to the pre-open resolution. Binary detection is per page, so a page of valid UTF-8 without NUL bytes reads as text even when the rest of the file is binary. For zero-size virtual files an EOF probe decides `truncated`, and a failed probe conservatively reports `truncated: true`. A short read before the planned window is EOF even when the stat size is larger (sysfs pads `st_size` to a page), and a descriptor that rejects offset reads is retried sequentially with a 4 MiB cap. A path whose name is not valid UTF-8 is reachable by passing `pathBase64` with the raw absolute path bytes; `path` and `pathBase64` are mutually exclusive. A directory page scans every entry to keep exact name order and total, so its work grows with the directory size even though the response is bounded; entry names with invalid UTF-8 bytes are decoded lossily for `name`, but their raw bytes remain reachable through `nameBase64` and `nextAfterBase64` / `afterBase64`.
 - The gateway surface is part of the bridge process, not a prototype forwarder. A Sites-native handler and a real deployment still need the Sites runtime and API.
 - Validate input schemas, HTTP limits, authentication, dispatch restrictions, CSRF and origin posture, audit logging, secret rotation, and response truncation before production.

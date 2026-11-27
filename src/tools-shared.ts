@@ -75,18 +75,31 @@ export const asText = (value: unknown) => ({
   content: [{ type: 'text' as const, text: JSON.stringify(value) }],
 });
 
-// Reads the task's status and refuses unless its directory is inside an allowed root.
-export async function inScopeStatus(taskId: string, scope: ToolScope) {
-  if (!scope.allowDirectories.length) throw new Error(ALLOWLIST_REQUIRED);
-  let current: unknown;
+async function requestTaskStatus(taskId: string, scope: ToolScope) {
   try {
-    current = await callDaemon(scope, TASK_STATUS, { taskId });
+    return await callDaemon(scope, TASK_STATUS, { taskId });
   } catch (e) {
     // The daemon's own "unknown task id" would tell a caller which IDs exist.
     if (e instanceof DaemonError && e.code === UNKNOWN_TASK)
       throw new Error(NOT_ACCESSIBLE, { cause: e });
     throw e;
   }
+}
+
+// Historical reads are fleet-wide for an authenticated caller: the task store is
+// authoritative, so a task whose dispatch directory has since been deleted (a
+// removed worktree, say) still reports its status. This performs no
+// workspace-directory check; authentication is enforced at the transport.
+// Dispatch, resume, summary and every mutation still use inScopeStatus.
+export async function readTaskStatus(taskId: string, scope: ToolScope) {
+  return requestTaskStatus(taskId, scope);
+}
+
+// Reads the task's status and refuses unless its directory is inside an allowed root.
+// Used by the write tools and summary, which queue or mutate work.
+export async function inScopeStatus(taskId: string, scope: ToolScope) {
+  if (!scope.allowDirectories.length) throw new Error(ALLOWLIST_REQUIRED);
+  const current = await requestTaskStatus(taskId, scope);
   const directory = (current as Json | null)?.directory;
   if (typeof directory !== 'string' || !(await inAllowedRoot(scope.allowDirectories, directory))) {
     throw new Error(NOT_ACCESSIBLE);
@@ -170,7 +183,7 @@ export async function readTaskResult(
   scope: ToolScope,
   options: { full?: boolean } = {},
 ) {
-  const current = (await inScopeStatus(taskId, scope)) as Json;
+  const current = (await readTaskStatus(taskId, scope)) as Json;
   const result = await callDaemon(scope, 'task.result', {
     taskId,
     ...(fields === undefined ? {} : { fields }),
